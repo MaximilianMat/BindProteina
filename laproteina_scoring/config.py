@@ -5,8 +5,8 @@ from typing import List, Dict, Any, Optional
 
 @dataclass
 class AF2Settings:
-    num_recycles: int = 3
-    num_models: int = 2 # Process only 2 models randomly by default
+    num_recycles: int = 1  # Reduced from 3
+    num_models: int = 1
     use_multimer: bool = True
     model_type: str = "multimer_v3"
     
@@ -20,7 +20,7 @@ class AF2Settings:
 
 @dataclass
 class RosettaSettings:
-    relax_repeats: int = 1
+    relax_repeats: int = 3
     # BindCraft uses: -ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball ... -corrections::beta_nov16 true
     dalphaball_path: str = "/path/to/Dalphaball" # Needs to be configured
 

@@ -1,9 +1,9 @@
 #!/bin/bash
-################## BindCraft installation script
+################## BindProteina installation script
 ################## specify conda/mamba folder, and installation folder for git repositories, and whether to use mamba or $pkg_manager
 # Default value for pkg_manager
 pkg_manager='conda'
-cuda=''
+cuda='12.6.1'
 
 # Define the short and long options
 OPTIONS=p:c:
@@ -49,37 +49,41 @@ install_dir=$(pwd)
 CONDA_BASE=$(conda info --base 2>/dev/null) || { echo -e "Error: conda is not installed or cannot be initialised."; exit 1; }
 echo -e "Conda is installed at: $CONDA_BASE"
 
-### BindCraft install begin, create base environment
-echo -e "Installing BindCraft environment\n"
-$pkg_manager create --name BindCraft python=3.10 -y || { echo -e "Error: Failed to create BindCraft conda environment"; exit 1; }
-conda env list | grep -w 'BindCraft' >/dev/null 2>&1 || { echo -e "Error: Conda environment 'BindCraft' does not exist after creation."; exit 1; }
+### BindProteina install begin, create base environment
+echo -e "Installing BindProteina environment\n"
+$pkg_manager create --name BindProteina python=3.11 -y || { echo -e "Error: Failed to create BindProteina conda environment"; exit 1; }
+conda env list | grep -w 'BindProteina' >/dev/null 2>&1 || { echo -e "Error: Conda environment 'BindProteina' does not exist after creation."; exit 1; }
 
-# Load newly created BindCraft environment
-echo -e "Loading BindCraft environment\n"
-source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindCraft || { echo -e "Error: Failed to activate the BindCraft environment."; exit 1; }
-[ "$CONDA_DEFAULT_ENV" = "BindCraft" ] || { echo -e "Error: The BindCraft environment is not active."; exit 1; }
-echo -e "BindCraft environment activated at ${CONDA_BASE}/envs/BindCraft"
+# Load newly created BindProteina environment
+echo -e "Loading BindProteina environment\n"
+source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindProteina || { echo -e "Error: Failed to activate the BindProteina environment."; exit 1; }
+[ "$CONDA_DEFAULT_ENV" = "BindProteina" ] || { echo -e "Error: The BindProteina environment is not active."; exit 1; }
+echo -e "BindProteina environment activated at ${CONDA_BASE}/envs/BindProteina"
 
 # install required conda packages
 echo -e "Instaling conda requirements\n"
+# Base packages + LaProteina additions (transformers, mmseqs2)
 if [ -n "$cuda" ]; then
   CONDA_OVERRIDE_CUDA="$cuda" $pkg_manager install \
     pip pandas matplotlib 'numpy<2.0.0' biopython scipy pdbfixer seaborn libgfortran5 tqdm jupyter ffmpeg pyrosetta fsspec py3dmol \
     chex dm-haiku 'flax<0.10.0' dm-tree joblib ml-collections immutabledict optax \
-    'jax>=0.4,<=0.6.0' 'jaxlib>=0.4,<=0.6.0=*cuda*' cuda-nvcc cudnn \
-    -c conda-forge -c nvidia --channel https://conda.graylab.jhu.edu -y \
+    'jax>=0.4,<=0.6.0' 'jax[cuda12-local]'==0.6.0 cuda-nvcc cudnn \
+    transformers=4.48.3 mmseqs2=17.b804f \
+    -c conda-forge -c nvidia -c bioconda --channel https://conda.graylab.jhu.edu -y \
   || { echo -e "Error: Failed to install conda packages."; exit 1; }
 else
   $pkg_manager install \
     pip pandas matplotlib 'numpy<2.0.0' biopython scipy pdbfixer seaborn libgfortran5 tqdm jupyter ffmpeg pyrosetta fsspec py3dmol \
     chex dm-haiku 'flax<0.10.0' dm-tree joblib ml-collections immutabledict optax \
-    'jax>=0.4,<=0.6.0' 'jaxlib>=0.4,<=0.6.0' \
-    -c conda-forge -c nvidia --channel https://conda.graylab.jhu.edu -y \
+    'jax>=0.4,<=0.6.0' 'jax[cuda12-local]'==0.6.0 mmseqs2=17.b804f \
+    -c conda-forge -c nvidia -c bioconda --channel https://conda.graylab.jhu.edu -y \
   || { echo -e "Error: Failed to install conda packages."; exit 1; }
 fi
 
-# make sure all required packages were installed
-required_packages=(pip pandas libgfortran5 matplotlib numpy biopython scipy pdbfixer seaborn tqdm jupyter ffmpeg pyrosetta fsspec py3dmol chex dm-haiku dm-tree joblib ml-collections immutabledict optax jaxlib jax cuda-nvcc cudnn)
+conda install chex dm-haiku 'flax<0.10.0' dm-tree joblib ml-collections immutabledict optax --channel https://conda.graylab.jhu.edu -y
+
+# make sure critical packages were installed
+required_packages=(pip pandas biopython scipy tqdm jax transformers mmseqs2)
 missing_packages=()
 
 # Check each package
@@ -95,6 +99,38 @@ if [ ${#missing_packages[@]} -ne 0 ]; then
     done
     exit 1
 fi
+
+# install pip requirements for LaProteina and upgraded BindProteina
+echo -e "Installing pip requirements\n"
+pip install \
+    python-dotenv==1.0.1 \
+    einops==0.6 \
+    lightning==2.5.0 \
+    loguru==0.7.2 \
+    hydra-core==1.3.1 \
+    biopandas==0.5.1 \
+    wandb==0.17.0 \
+    wget==3.2 \
+    jaxtyping \
+    loralib \
+    'biotite>=0.41.0' \
+    cpdb-protein==0.2.0 \
+    'pre-commit>=4.0.0' \
+    rich==14.0.0 \
+    'deepdiff>=8.6.1' \
+    multipledispatch \
+    plotly \
+    pydantic \
+    rich-click \
+    scikit-learn \
+    xarray \
+|| { echo -e "Error: Failed to install pip packages."; exit 1; }
+
+# install specific torch and geometric versions requested for LaProteina
+echo -e "Installing specialized torch and geometric versions\n"
+pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu126 || { echo -e "Error: Failed to install torch"; exit 1; }
+pip install graphein==1.7.7 --no-deps || { echo -e "Error: Failed to install graphein"; exit 1; }
+pip install torch_geometric torch_scatter torch_sparse torch_cluster -f https://data.pyg.org/whl/torch-2.8.0+cu126.html || { echo -e "Error: Failed to install torch-geometric"; exit 1; }
 
 # install ColabDesign
 echo -e "Installing ColabDesign\n"
@@ -124,7 +160,7 @@ chmod +x "${install_dir}/functions/DAlphaBall.gcc" || { echo -e "Error: Failed t
 
 # finish
 conda deactivate
-echo -e "BindCraft environment set up\n"
+echo -e "BindProteina environment set up with LaProteina support\n"
 
 ############################################################################################################
 ############################################################################################################
@@ -135,7 +171,7 @@ echo -e "$pkg_manager cleaned up\n"
 
 ################## finish script
 t=$SECONDS 
-echo -e "Successfully finished BindCraft installation!\n"
-echo -e "Activate environment using command: \"$pkg_manager activate BindCraft\""
+echo -e "Successfully finished BindProteina installation!\n"
+echo -e "Activate environment using command: \"$pkg_manager activate BindProteina\""
 echo -e "\n"
 echo -e "Installation took $(($t / 3600)) hours, $((($t / 60) % 60)) minutes and $(($t % 60)) seconds."

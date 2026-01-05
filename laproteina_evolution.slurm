@@ -11,11 +11,11 @@
 
 # Initialise environment and modules
 CONDA_BASE=$(conda info --base)
-source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindCraft
+source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindProteina
 export LD_LIBRARY_PATH=${CONDA_BASE}/lib
 
 # Get the directory where the script is located
-SCRIPT_DIR="/nfs/homedirs/matscher/repos/BindCraft"
+SCRIPT_DIR="/nfs/homedirs/matscher/repos/BindProteina"
 cd $SCRIPT_DIR
 
 echo "Running the LaProteina evolution workflow"

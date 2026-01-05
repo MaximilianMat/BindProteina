@@ -202,5 +202,13 @@ class LaProteinaScorer:
              
              final_metrics[model_id] = model_data
              
+        # Clear memory after each design to prevent cuSolver handle pool exhaustion
+        # Only do gc.collect() here - clear_mem() is too aggressive and causes "Array has been deleted" errors
+        try:
+            import gc
+            gc.collect()
+        except:
+            pass
+        
         # Return all model metrics
         return {"design_name": design_name, "models": final_metrics}

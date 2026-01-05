@@ -6,11 +6,16 @@ import sys
 # This prevents JAX from preallocating all VRAM and helps avoid cuSolver errors
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+os.environ["JAX_TRACEBACK_FILTERING"] = "off"  # Show full JAX tracebacks for debugging
 
 import json
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
+
+# Optimize for A100 Tensor Cores
+import torch
+torch.set_float32_matmul_precision('medium')
 
 # Ensure we can import from BindCraft root
 sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -64,7 +69,7 @@ def main():
     bindcraft_root = os.path.dirname(scoring_dir)
     
     if not filter_path:
-        default_filter_path = os.path.join(bindcraft_root, "settings_filters", "default_filters.json")
+        default_filter_path = os.path.join(bindcraft_root, "settings_filters", "laProteina_filters.json")
         if os.path.exists(default_filter_path):
             filter_path = default_filter_path
             print(f"No filters specified, using default: {filter_path}")
@@ -297,18 +302,51 @@ def main():
             return value <= threshold
             
     # 4. Score Loop
-    for pdb_file in tqdm(pdb_files, desc="Scoring Designs"):
+    # Periodic memory clearing to prevent cuSolver handle exhaustion
+    # Use gc.collect() only - clear_mem() is too aggressive and causes "Array has been deleted" errors
+    clear_every_n = 5  # Clear memory every N designs (increased from 3)
+    
+    for idx, pdb_file in enumerate(tqdm(pdb_files, desc="Scoring Designs")):
+        # Periodic memory cleanup - only gc.collect(), not clear_mem()
+        # Removed artificial delays (0.2s, 0.5s) now that cuDNN is fixed
+        if idx > 0 and idx % clear_every_n == 0:
+            try:
+                import gc
+                gc.collect()
+            except:
+                pass
+        
         design_name = pdb_file.stem
         
         # Use the input PDB itself as the target structure source (Chain A)
         target_pdb = str(pdb_file)
         
-        results = scorer.score_design(
-            pdb_path=str(pdb_file),
-            target_pdb=target_pdb,
-            output_dir=str(output_path),
-            design_name=design_name
-        )
+        try:
+            results = scorer.score_design(
+                pdb_path=str(pdb_file),
+                target_pdb=target_pdb,
+                output_dir=str(output_path),
+                design_name=design_name
+            )
+        except Exception as e:
+            # Handle cuSolver errors gracefully
+            error_msg = str(e)
+            if "cuSolver" in error_msg or "gpusolverDnCreate" in error_msg:
+                print(f"cuSolver error for {design_name}: {error_msg}")
+                # Try to clear memory and continue - only gc.collect(), not clear_mem()
+                try:
+                    import gc
+                    gc.collect()
+                except:
+                    pass
+                all_results.append({
+                    "design_name": design_name,
+                    "status": "failed",
+                    "reason": f"cuSolver error: {error_msg[:100]}"
+                })
+                continue
+            else:
+                raise
         
         if "error" in results:
             print(f"Failed {design_name}: {results['error']}")

@@ -5,7 +5,7 @@
 import os
 import pyrosetta as pr
 from pyrosetta.rosetta.core.kinematics import MoveMap
-from pyrosetta.rosetta.core.select.residue_selector import ChainSelector
+from pyrosetta.rosetta.core.select.residue_selector import ChainSelector, NeighborhoodResidueSelector
 from pyrosetta.rosetta.protocols.simple_moves import AlignChainMover
 from pyrosetta.rosetta.protocols.analysis import InterfaceAnalyzerMover
 from pyrosetta.rosetta.protocols.relax import FastRelax
@@ -73,6 +73,52 @@ def score_interface(pdb_file, binder_chain="B"):
     interface_dG_SASA_ratio = interfacescore.dG_dSASA_ratio * 100 # ratio of dG/dSASA (normalised energy for interface area size)
     buns_filter = XmlObjects.static_get_filter('<BuriedUnsatHbonds report_all_heavy_atom_unsats="true" scorefxn="scorefxn" ignore_surface_res="false" use_ddG_style="true" dalphaball_sasa="1" probe_radius="1.1" burial_cutoff_apo="0.2" confidence="0" />')
     interface_delta_unsat_hbonds = buns_filter.report_sm(pose)
+    
+    # Get target chain (A) interface residues using PyRosetta
+    # Calculate interface residues based on distance between target and binder chains
+    target_interface_residues = []
+    try:
+        pdb_info = pose.pdb_info()
+        target_chain_id = 'A'
+        binder_chain_id = binder_chain
+        
+        # Get residue indices for binder chain
+        binder_residues = []
+        for res_num in range(1, pose.size() + 1):
+            if pdb_info.chain(res_num) == binder_chain_id:
+                binder_residues.append(res_num)
+        
+        if not binder_residues:
+            target_interface_residues_str = ""
+        else:
+            # Create a selector for binder chain residues
+            binder_selector = ChainSelector(binder_chain_id)
+            
+            # Use NeighborhoodResidueSelector to find target residues near binder
+            # This identifies residues within distance cutoff of the binder chain
+            neighbor_selector = NeighborhoodResidueSelector()
+            neighbor_selector.set_distance(8.0)  # Distance cutoff in Angstroms
+            neighbor_selector.set_focus_selector(binder_selector)
+            
+            # Apply selector to get interface residues
+            interface_subset = neighbor_selector.apply(pose)
+            interface_residue_indices = get_residues_from_subset(interface_subset)
+            
+            # Filter for target chain (A) residues only
+            for res_num in interface_residue_indices:
+                chain_id = pdb_info.chain(res_num)
+                if chain_id == target_chain_id:
+                    pdb_res_num = pdb_info.number(res_num)
+                    target_interface_residues.append(pdb_res_num)
+            
+            # Sort and convert to comma-separated string
+            target_interface_residues = sorted(set(target_interface_residues))
+            target_interface_residues_str = ','.join(map(str, target_interface_residues))
+    except Exception as e:
+        # Fallback: use empty list
+        target_interface_residues_str = ""
+        import warnings
+        warnings.warn(f"Could not extract target interface residues from PyRosetta: {e}. Using empty list.")
 
     if interface_nres != 0:
         interface_hbond_percentage = (interface_interface_hbonds / interface_nres) * 100 # Hbonds per interface size percentage
@@ -135,7 +181,8 @@ def score_interface(pdb_file, binder_chain="B"):
     'interface_interface_hbonds': interface_interface_hbonds,
     'interface_hbond_percentage': interface_hbond_percentage,
     'interface_delta_unsat_hbonds': interface_delta_unsat_hbonds,
-    'interface_delta_unsat_hbonds_percentage': interface_bunsch_percentage
+    'interface_delta_unsat_hbonds_percentage': interface_bunsch_percentage,
+    'target_interface_residues': target_interface_residues_str 
     }
 
     # round to two decimal places
