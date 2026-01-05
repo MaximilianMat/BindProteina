@@ -11,12 +11,12 @@
 
 # Initialise environment and modules
 CONDA_BASE=$(conda info --base)
-source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindCraft
+source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindProteina
 export LD_LIBRARY_PATH=${CONDA_BASE}/lib
 
 # Get the directory where the script is located
-SCRIPT_DIR="/nfs/homedirs/matscher/repos/BindCraft"
+SCRIPT_DIR="/nfs/homedirs/matscher/repos/BindProteina"
 
 echo "Running the LaProteina scoring pipeline"
 # Pass all arguments directly to the python module
-python test_interface_residues.py evolution_output/evolution_20251228_1637/round_1/scored/af2_predictions/R1B60599_sample_000_model1.pdb
+python test_interface_residues.py ../../evolution_output/evolution_20251228_1637/round_1/scored/af2_predictions/R1B60599_sample_000_model1.pdb

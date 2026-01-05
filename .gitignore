@@ -1,0 +1,38 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+
+# Model files and checkpoints
+*.ckpt
+*.npz
+*.pt
+*.pth
+*.bin
+*.h5
+*.onnx
+*.weights
+*.pb
+*.model
+laproteina/checkpoints/
+checkpoints_laproteina/
+params/
+
+# Data and outputs
+processed/
+outputs/
+results/
+slurm-*.out
+*.log
+
+# IDE files
+.vscode/
+.idea/
