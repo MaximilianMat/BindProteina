@@ -1,0 +1,9 @@
+{
+    "design_path": "/nfs/homedirs/matscher/targets/npt2b",
+    "binder_name": "NPT2B",
+    "starting_pdb": "/nfs/homedirs/matscher/targets/npt2b/npt2b.pdb",
+    "chains": "A",
+    "target_hotspot_residues": "122-135,234-362,429-485",
+    "lengths": [40, 70],
+    "number_of_final_designs": 75
+}

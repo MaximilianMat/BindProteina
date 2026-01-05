@@ -1,0 +1,9 @@
+{
+    "design_path": "/nfs/homedirs/matscher/targets/cld18",
+    "binder_name": "CLD18",
+    "starting_pdb": "/nfs/homedirs/matscher/targets/cld18/cld18.pdb",
+    "chains": "A",
+    "target_hotspot_residues": "28-80,144-174",
+    "lengths": [40, 70],
+    "number_of_final_designs": 75
+}

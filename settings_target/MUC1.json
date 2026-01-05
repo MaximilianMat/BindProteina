@@ -1,0 +1,9 @@
+{
+    "design_path": "/nfs/homedirs/matscher/targets/muc1",
+    "binder_name": "MUC1",
+    "starting_pdb": "/nfs/homedirs/matscher/targets/muc1/muc1_target.pdb",
+    "chains": "A",
+    "target_hotspot_residues": "A",
+    "lengths": [40, 70],
+    "number_of_final_designs": 20
+}
