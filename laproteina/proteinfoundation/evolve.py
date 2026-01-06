@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 import subprocess
+import json
 import torch
 import pandas as pd
 from pathlib import Path
@@ -16,6 +17,11 @@ from laproteina.proteinfoundation.optimizer import IterativeOptimizer
 from laproteina.proteinfoundation.laproteina_generator import LaProteinaGenerator, GenerationConfig
 from laproteina.proteinfoundation.config_builder import get_pdb_chain_length
 
+def load_settings(settings_path):
+    """Load settings from a JSON file."""
+    with open(settings_path, 'r') as f:
+        return json.load(f)
+
 def main():
     # Set matmul precision for performance on Tensor Cores
     if torch.cuda.is_available():
@@ -23,25 +29,93 @@ def main():
     
     parser = argparse.ArgumentParser(description="Iterative Optimization Workflow (Binder Evolution)")
     
+    # Settings file (alternative to individual arguments)
+    parser.add_argument("--settings", type=str, default=None, help="Path to JSON settings file (e.g., settings_evolution/CLD18.json). Command-line arguments override settings file values.")
+    
     # Inputs
-    parser.add_argument("--target_pdb", type=str, required=True, help="Original native target PDB")
-    parser.add_argument("--input_csv", type=str, required=True, help="Scoring summary CSV from the previous run")
-    parser.add_argument("--seeds_dir", type=str, required=True, help="Directory containing the PDBs listed in input_csv")
-    parser.add_argument("--checkpoint", type=str, required=True, help="LaProteina checkpoint path")
-    parser.add_argument("--output_base_dir", type=str, default="./evolution_output", help="Base output directory")
+    parser.add_argument("--target_pdb", type=str, default=None, help="Original native target PDB")
+    parser.add_argument("--input_csv", type=str, default=None, help="Scoring summary CSV from the previous run")
+    parser.add_argument("--seeds_dir", type=str, default=None, help="Directory containing the PDBs listed in input_csv")
+    parser.add_argument("--checkpoint", type=str, default=None, help="LaProteina checkpoint path")
+    parser.add_argument("--output_base_dir", type=str, default=None, help="Base output directory")
     
     # Evolution Parameters
-    parser.add_argument("--rounds", type=int, default=3, help="Number of evolution rounds")
-    parser.add_argument("--n_samples_per_seed", type=int, default=6, help="Number of samples to generate per seed")
-    parser.add_argument("--metric", type=str, default="i_pTM", help="Metric to rank seeds")
-    parser.add_argument("--top_n", type=int, default=3, help="Number of seeds to pick per round")
-    parser.add_argument("--plddt_threshold", type=float, default=55.0, help="pLDDT threshold for fixing binder residues")
-    parser.add_argument("--linker_length", type=int, default=0, help="Length of linker (used for binder extraction)")
-    parser.add_argument("--device", type=str, default="cuda", help="Device (cuda/cpu)")
+    parser.add_argument("--rounds", type=int, default=None, help="Number of evolution rounds")
+    parser.add_argument("--n_samples_per_seed", type=int, default=None, help="Number of samples to generate per seed")
+    parser.add_argument("--metric", type=str, default=None, help="Metric to rank seeds")
+    parser.add_argument("--top_n", type=int, default=None, help="Number of seeds to pick per round")
+    parser.add_argument("--plddt_threshold", type=float, default=None, help="pLDDT threshold for fixing binder residues")
+    parser.add_argument("--linker_length", type=int, default=None, help="Length of linker (used for binder extraction)")
+    parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
     parser.add_argument("--target_hotspot_residues", type=str, default=None, help="Target hotspot regions (e.g., '300-350,400-450'). Seeds without interface residues in these regions will be filtered out.")
     parser.add_argument("--target_blacklist_residues", type=str, default=None, help="Target blacklist regions (e.g., '1-100,200-300'). Seeds with interface residues in these regions will be filtered out.")
 
     args = parser.parse_args()
+    
+    # Load settings from file if provided
+    settings = {}
+    if args.settings:
+        settings_path = Path(args.settings)
+        if not settings_path.is_absolute():
+            # Try relative to repo root
+            repo_root = Path(__file__).parent.parent.parent
+            settings_path = repo_root / settings_path
+        if not settings_path.exists():
+            logger.error(f"Settings file not found: {args.settings}")
+            sys.exit(1)
+        settings = load_settings(settings_path)
+        logger.info(f"Loaded settings from: {settings_path}")
+    
+    # Merge settings with command-line arguments (CLI args take precedence)
+    def get_arg(key, cli_value, default=None):
+        """Get argument value: CLI > settings > default"""
+        if cli_value is not None:
+            return cli_value
+        if key in settings:
+            return settings[key]
+        return default
+    
+    # Required arguments (must be in settings or CLI)
+    target_pdb = get_arg("target_pdb", args.target_pdb)
+    input_csv = get_arg("input_csv", args.input_csv)
+    seeds_dir = get_arg("seeds_dir", args.seeds_dir)
+    checkpoint = get_arg("checkpoint", args.checkpoint)
+    
+    if not all([target_pdb, input_csv, seeds_dir, checkpoint]):
+        parser.error("Missing required arguments. Either provide --settings file or specify --target_pdb, --input_csv, --seeds_dir, and --checkpoint")
+    
+    # Optional arguments with defaults
+    output_base_dir = get_arg("output_base_dir", args.output_base_dir, "./evolution_output")
+    rounds = get_arg("rounds", args.rounds, 3)
+    n_samples_per_seed = get_arg("n_samples_per_seed", args.n_samples_per_seed, 6)
+    metric = get_arg("metric", args.metric, "i_pTM")
+    top_n = get_arg("top_n", args.top_n, 3)
+    plddt_threshold = get_arg("plddt_threshold", args.plddt_threshold, 55.0)
+    linker_length = get_arg("linker_length", args.linker_length, 0)
+    device = get_arg("device", args.device, "cuda")
+    target_hotspot_residues = get_arg("target_hotspot_residues", args.target_hotspot_residues, None)
+    target_blacklist_residues = get_arg("target_blacklist_residues", args.target_blacklist_residues, None)
+    
+    # Create a namespace-like object for compatibility with rest of code
+    class Args:
+        pass
+    args_obj = Args()
+    args_obj.target_pdb = target_pdb
+    args_obj.input_csv = input_csv
+    args_obj.seeds_dir = seeds_dir
+    args_obj.checkpoint = checkpoint
+    args_obj.output_base_dir = output_base_dir
+    args_obj.rounds = rounds
+    args_obj.n_samples_per_seed = n_samples_per_seed
+    args_obj.metric = metric
+    args_obj.top_n = top_n
+    args_obj.plddt_threshold = plddt_threshold
+    args_obj.linker_length = linker_length
+    args_obj.device = device
+    args_obj.target_hotspot_residues = target_hotspot_residues
+    args_obj.target_blacklist_residues = target_blacklist_residues
+    
+    args = args_obj
 
     # Setup Output
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
@@ -169,7 +243,7 @@ def main():
         import biotite.structure.io as strucio
         import biotite.structure as struc
         
-        target_len = get_pdb_chain_length(args.target_pdb, 'A')
+        target_len = get_pdb_chain_length(fix_path(args.target_pdb), 'A')
         split_point = target_len
 
         for pdb in generated_dir.rglob("*.pdb"):

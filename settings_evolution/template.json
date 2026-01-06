@@ -1,0 +1,22 @@
+{
+    "_comment": "Evolution settings template. Copy this file and customize for your target.",
+    "_required_fields": ["target_pdb", "input_csv", "seeds_dir", "checkpoint"],
+    
+    "target_pdb": "/path/to/target.pdb",
+    "input_csv": "/path/to/previous_round/scored/scoring_summary.csv",
+    "seeds_dir": "/path/to/previous_round/scored/af2_predictions",
+    "checkpoint": "/path/to/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
+    
+    "output_base_dir": "./evolution_output",
+    "rounds": 5,
+    "n_samples_per_seed": 6,
+    "metric": "i_pTM",
+    "top_n": 3,
+    "plddt_threshold": 55.0,
+    "linker_length": 0,
+    "device": "cuda",
+    
+    "target_hotspot_residues": "28-74,157-174",
+    "target_blacklist_residues": "1-23,81-150"
+}
+

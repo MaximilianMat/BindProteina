@@ -48,7 +48,37 @@ bash install.sh --cuda '12.6' --pkg_manager 'conda'
 ## 🏃 Running the Pipeline
 
 ### Evolutionary Workflow
-To start an evolution run, use the `evolve.py` script. It requires an initial scoring summary and a target PDB.
+
+#### Using Settings Files (Recommended)
+For long-running evolution experiments, use a settings file to avoid lengthy command-line arguments:
+
+```bash
+# Using a settings file
+python laproteina/proteinfoundation/evolve.py \
+    --settings settings_evolution/CLD18.json
+```
+
+Create your settings file by copying `settings_evolution/template.json` and customizing the paths and parameters:
+
+```json
+{
+    "target_pdb": "/path/to/target.pdb",
+    "input_csv": "/path/to/previous_round/scored/scoring_summary.csv",
+    "seeds_dir": "/path/to/previous_round/scored/af2_predictions",
+    "checkpoint": "/path/to/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
+    "output_base_dir": "./evolution_output",
+    "rounds": 24,
+    "top_n": 8,
+    "metric": "i_pTM",
+    "target_hotspot_residues": "28-74,157-174",
+    "target_blacklist_residues": "1-23,81-150"
+}
+```
+
+**Note:** Command-line arguments override settings file values, allowing you to quickly adjust parameters without editing the file.
+
+#### Using Command-Line Arguments
+Alternatively, you can specify all parameters directly:
 
 ```bash
 python laproteina/proteinfoundation/evolve.py \
@@ -59,6 +89,14 @@ python laproteina/proteinfoundation/evolve.py \
     --rounds 5 \
     --top_n 3 \
     --metric i_pTM
+```
+
+#### Running with SLURM
+Submit evolution jobs using the provided SLURM script:
+
+```bash
+sbatch laproteina_evolution.slurm \
+    --settings settings_evolution/CLD18.json
 ```
 
 ### Pure Scoring
@@ -98,6 +136,7 @@ Analyze your results using the interactive web dashboard.
 
 - `workflow_diagram.md`: Detailed Mermaid diagrams of the pipeline logic.
 - `settings_target/`: Example JSON configurations for different targets.
+- `settings_evolution/`: Evolution workflow settings files (use these instead of long command-line arguments).
 - `params/`: AlphaFold2 model weights storage.
 
 ---

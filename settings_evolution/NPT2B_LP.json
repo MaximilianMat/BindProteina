@@ -1,0 +1,17 @@
+{
+    "target_pdb": "/nfs/homedirs/matscher/targets/npt2b_LP/npt2b.pdb",
+    "input_csv": "/nfs/homedirs/matscher/evolution_output/evolution_20260103_2346/round_14/scored/scoring_summary.csv",
+    "seeds_dir": "/nfs/homedirs/matscher/evolution_output/evolution_20260103_2346/round_14/scored/af2_predictions",
+    "checkpoint": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
+    "output_base_dir": "/nfs/homedirs/matscher/evolution_output",
+    "rounds": 20,
+    "n_samples_per_seed": 6,
+    "metric": "i_pTM",
+    "top_n": 6,
+    "plddt_threshold": 55.0,
+    "linker_length": 0,
+    "device": "cuda",
+    "target_hotspot_residues": "250-362",
+    "target_blacklist_residues": null
+}
+
