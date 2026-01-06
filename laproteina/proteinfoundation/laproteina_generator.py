@@ -39,7 +39,7 @@ class GenerationConfig:
     """Configuration for generation parameters."""
     
     n_samples: int = 28
-    max_batch_size: int = 4
+    max_batch_size: int = 2
     n_steps: int = 400
     seed: int = 5
     device: str = "cuda"
@@ -249,7 +249,7 @@ class LaProteinaGenerator:
         n_steps: int = 400,  # Match inference_base.yaml default
         seed: int = 5,       # Match inference_base.yaml default
         linker_length: int = 0,
-        max_batch_size: int = 4,
+        max_batch_size: int = 2,
         contig_string: Optional[str] = None, # Allow override for complex contigs
         design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
     ) -> List[str]:
