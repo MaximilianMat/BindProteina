@@ -74,19 +74,73 @@ def fold_linked_pdb(
     
     # Ensure equal atom counts for alignment (might differ if templates had missing atoms)
     # Biotite superimpose needs same number of atoms
-    common_mask_folded = np.isin(folded_bb.res_id, native_bb.res_id) # Simplify: assume residues match
-    # Realistically we should find the intersection of atoms.
+    # Find matching residues between native and folded target
+    native_res_ids = np.unique(native_bb.res_id)
+    folded_res_ids = np.unique(folded_bb.res_id)
+    common_res_ids = np.intersect1d(native_res_ids, folded_res_ids)
     
-    # Simple alignment attempt
-    try:
-        _, transformation = struc.superimpose(native_bb, folded_bb)
-        # Apply transformation to the WHOLE folded complex
-        folded_complex_aligned = struc.apply_transformation(folded_complex, transformation)
-        # Re-extract aligned linker
-        aligned_linker = folded_complex_aligned[np.isin(folded_complex_aligned.res_id, linker_res_ids)]
-    except Exception as e:
-        logger.warning(f"Structural alignment failed: {e}. Falling back to unaligned prediction.")
+    if len(common_res_ids) == 0:
+        logger.warning("No common residues found for alignment. Using unaligned linker.")
         aligned_linker = folded_linker
+    else:
+        # Filter to common residues only
+        native_bb_common = native_bb[np.isin(native_bb.res_id, common_res_ids)]
+        folded_bb_common = folded_bb[np.isin(folded_bb.res_id, common_res_ids)]
+        
+        # Ensure same number of atoms (same residues, same atom types)
+        # Sort by residue ID and atom name to ensure matching order
+        native_bb_common = native_bb_common[np.lexsort((native_bb_common.atom_name, native_bb_common.res_id))]
+        folded_bb_common = folded_bb_common[np.lexsort((folded_bb_common.atom_name, folded_bb_common.res_id))]
+        
+        # Check if we have matching atom counts
+        if len(native_bb_common) != len(folded_bb_common):
+            logger.warning(f"Atom count mismatch ({len(native_bb_common)} vs {len(folded_bb_common)}). Using unaligned linker.")
+            aligned_linker = folded_linker
+        else:
+            try:
+                # Get coordinates
+                native_coords = native_bb_common.coord
+                folded_coords = folded_bb_common.coord
+                
+                # Calculate transformation matrix using Kabsch algorithm
+                # Center coordinates
+                native_center = np.mean(native_coords, axis=0)
+                folded_center = np.mean(folded_coords, axis=0)
+                native_centered = native_coords - native_center
+                folded_centered = folded_coords - folded_center
+                
+                # Calculate covariance matrix
+                H = folded_centered.T @ native_centered
+                
+                # SVD
+                U, S, Vt = np.linalg.svd(H)
+                
+                # Rotation matrix
+                R = Vt.T @ U.T
+                
+                # Ensure proper rotation (det(R) = 1)
+                if np.linalg.det(R) < 0:
+                    Vt[-1, :] *= -1
+                    R = Vt.T @ U.T
+                
+                # Translation vector
+                t = native_center - R @ folded_center
+                
+                # Apply transformation to entire folded complex
+                folded_complex_coords = folded_complex.coord
+                transformed_coords = (folded_complex_coords @ R.T) + t
+                
+                # Create aligned structure
+                folded_complex_aligned = folded_complex.copy()
+                folded_complex_aligned.coord = transformed_coords
+                
+                # Re-extract aligned linker
+                aligned_linker = folded_complex_aligned[np.isin(folded_complex_aligned.res_id, linker_res_ids)]
+                
+                logger.info(f"Successfully aligned linker using {len(common_res_ids)} common residues")
+            except Exception as e:
+                logger.warning(f"Structural alignment failed: {e}. Falling back to unaligned prediction.")
+                aligned_linker = folded_linker
 
     # 4. Construct Hybrid PDB
     # Re-number aligned linker to follow native target

@@ -9,6 +9,7 @@ Usage:
 import argparse
 import os
 import sys
+import torch
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -16,6 +17,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def main():
+    # Set matmul precision for performance on Tensor Cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision('medium')
+
     parser = argparse.ArgumentParser(description="Test LaProteina Generator")
     parser.add_argument(
         "--target_pdb",

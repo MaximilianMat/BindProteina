@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader
 from omegaconf import OmegaConf, DictConfig
 from loguru import logger
 
+# Optimize for A100 Tensor Cores
+torch.set_float32_matmul_precision('medium')
 
 @dataclass
 class MotifConfig:
@@ -29,6 +31,7 @@ class MotifConfig:
     motif_max_length: int = 150
     segment_order: str = "A"
     atom_selection_mode: str = "tip_atoms"  # tip_atoms, all_atom, ca_only, backbone
+    design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
 
 
 @dataclass
@@ -247,6 +250,8 @@ class LaProteinaGenerator:
         seed: int = 5,       # Match inference_base.yaml default
         linker_length: int = 0,
         max_batch_size: int = 4,
+        contig_string: Optional[str] = None, # Allow override for complex contigs
+        design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
     ) -> List[str]:
         """
         Generate binder candidates for a target protein.
@@ -261,6 +266,8 @@ class LaProteinaGenerator:
             atom_selection_mode: Atom selection for motif conditioning
             n_steps: Number of diffusion steps
             seed: Random seed for reproducibility
+            contig_string: Optional custom contig string (e.g. A1-100/10-20/A120-150)
+                           If provided, this overrides standard contig construction.
             
         Returns:
             List of paths to generated PDB files
@@ -268,21 +275,32 @@ class LaProteinaGenerator:
         # Ensure model is loaded
         self._load_model()
         
-        # Build contig string: target_chain + residue range / binder length range
-        target_start, target_end = target_residue_range
-        binder_min, binder_max = binder_length_range
-        
-        # Format: A1-705/20-80 (target chain + range / binder length range)
-        motif_end = target_end + linker_length
-        contig_string = f"{target_chain}{target_start}-{motif_end}/{binder_min}-{binder_max}"
-        
-        # Calculate total length bounds
-        target_length = target_end - target_start + 1
-        total_min = target_length + linker_length + binder_min
-        total_max = target_length + linker_length + binder_max
+        # Build contig string
+        # Build contig string
+        if contig_string:
+            logger.info(f"Using custom contig: {contig_string}")
+    
+            total_min = 50 # minimal dummy
+            total_max = 2000 # maximal dummy
+        else:
+            # Build standard contig string: target_chain + residue range / binder length range
+            target_start, target_end = target_residue_range
+            binder_min, binder_max = binder_length_range
+            
+            # Format: A1-705/20-80 (target chain + range / binder length range)
+            # Use provided linker length if defined globally or default
+            # Use provided linker length
+            linker_len = linker_length 
+            
+            motif_end = target_end + linker_len
+            contig_string = f"{target_chain}{target_start}-{motif_end}/{binder_min}-{binder_max}"
+            
+            # Calculate total length bounds
+            target_len = target_end - target_start + 1
+            total_min = target_len + linker_len + binder_min
+            total_max = target_len + linker_len + binder_max
         
         logger.info(f"Generating binders with contig: {contig_string}")
-        logger.info(f"Total length range: {total_min} - {total_max}")
         
         # Build configs
         motif_cfg = MotifConfig(
@@ -293,6 +311,7 @@ class LaProteinaGenerator:
             motif_max_length=total_max,
             segment_order=target_chain,
             atom_selection_mode=atom_selection_mode,
+            design_id=design_id,
         )
         
         gen_cfg = GenerationConfig(
@@ -378,9 +397,13 @@ class LaProteinaGenerator:
         for idx, pred in enumerate(predictions_flat):
             coors_atom37, residue_type = pred
             
-            # Match original generate.py directory and naming structure
-            # dir_name = f"job_{job_id}_id_{j}_motif_{motif_pdb_name}"
-            dir_name = f"job_0_id_{idx}_motif_{motif_pdb_name}"
+            # Use short ID if available (for evolution workflow), otherwise use original naming
+            if motif_cfg.design_id:
+                dir_name = f"{motif_cfg.design_id}_sample_{idx:03d}"
+            else:
+                # Match original generate.py directory and naming structure
+                # dir_name = f"job_{job_id}_id_{j}_motif_{motif_pdb_name}"
+                dir_name = f"job_0_id_{idx}_motif_{motif_pdb_name}"
             sample_root_path = output_path / dir_name
             sample_root_path.mkdir(parents=True, exist_ok=True)
             

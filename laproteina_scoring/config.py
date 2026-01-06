@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 
 @dataclass
 class AF2Settings:
-    num_recycles: int = 1  # Reduced from 3
+    num_recycles: int = 3  # Reduced from 3
     num_models: int = 1
     use_multimer: bool = True
     model_type: str = "multimer_v3"

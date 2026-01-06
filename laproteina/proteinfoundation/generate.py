@@ -340,6 +340,10 @@ def save_motif_predictions(
 def main():
     load_dotenv()
 
+    # Set matmul precision for performance on Tensor Cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision('medium')
+
     # Parse arguments, load appropriate config, and set up root path
     args, cfg, config_name = parse_args_and_cfg()
     # cfg.run_name_

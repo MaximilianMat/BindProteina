@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 import subprocess
+import torch
 import pandas as pd
 from pathlib import Path
 from loguru import logger
@@ -16,6 +17,10 @@ from laproteina.proteinfoundation.laproteina_generator import LaProteinaGenerato
 from laproteina.proteinfoundation.config_builder import get_pdb_chain_length
 
 def main():
+    # Set matmul precision for performance on Tensor Cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision('medium')
+    
     parser = argparse.ArgumentParser(description="Iterative Optimization Workflow (Binder Evolution)")
     
     # Inputs
@@ -46,31 +51,31 @@ def main():
     logger.add(main_output_dir / "evolution.log")
     logger.info(f"Starting Evolution Workflow: {args.rounds} rounds, top {args.top_n} seeds based on {args.metric}")
 
+    # Ensure paths are absolute if they look like they might be missing a leading slash on this system
+    def fix_path(p):
+        if p and (p.startswith("nfs/") or p.startswith("home/")):
+            return "/" + p
+        return p
+
     # Initialize Components
     optimizer = IterativeOptimizer(str(main_output_dir))
     
     # Generator (Load Model Once)
     logger.info("Loading LaProteina Model...")
-    # Assume autoencoder is in same folder as checkpoint if not specified, or standard path
-    # For now, simplistic path resolution or assume user provides valid checkpoint
-    # We might need autoencoder path. Let's try to infer or add arg if critical.
-    # Assuming config allows inference without explicit AE path if checkpoint has it?
-    # Actually LaProteinaGenerator needs it. Let's add arg or try default.
-    # Hack: infer from checkpoint path common structure
-    ckpt_path = Path(args.checkpoint)
+    ckpt_path = Path(fix_path(args.checkpoint))
     ae_path = ckpt_path.parent / "AE3_motif.ckpt" # Common default?
     
     generator = LaProteinaGenerator(
-        checkpoint_path=args.checkpoint,
+        checkpoint_path=str(ckpt_path),
         autoencoder_path=str(ae_path) if ae_path.exists() else None,
         device=args.device
     )
     generator._load_model() # Preload
 
-    current_csv = args.input_csv
-    current_pdb_dir = Path(args.seeds_dir)
+    current_csv = fix_path(args.input_csv)
+    current_pdb_dir = Path(fix_path(args.seeds_dir))
 
-    target_length = get_pdb_chain_length(args.target_pdb, "A")
+    target_length = get_pdb_chain_length(fix_path(args.target_pdb), "A")
     logger.info(f"Native Target Length: {target_length}")
 
     for round_idx in range(1, args.rounds + 1):
@@ -144,8 +149,7 @@ def main():
                     n_samples=args.n_samples_per_seed,
                     output_dir=str(generated_dir / f"{short_id}_evolved"),
                     contig_string=contig,
-                    linker_length=args.linker_length,
-                    design_id=short_id
+                    linker_length=args.linker_length
                 )
                 
             except Exception as e:

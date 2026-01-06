@@ -272,6 +272,10 @@ def store_n_log_configs(cfg_exp, cfg_data, run_name, ckpt_path_store, wandb_logg
 def main(cfg_exp) -> None:
     load_dotenv()
 
+    # Set matmul precision for performance on Tensor Cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision('medium')
+
     is_cluster_run = False
     nolog = cfg_exp.get(
         "nolog", False
