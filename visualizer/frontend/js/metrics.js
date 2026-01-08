@@ -21,7 +21,7 @@ class MetricsDisplay {
             "i_pTM", "pTM", "pLDDT", "average_plddt",
             "interface_dG", "interface_dSASA", "interface_sc",
             "interface_nres", "interface_interface_hbonds",
-            "linker_length"
+            "binder_length"
         ];
         
         keyMetrics.forEach(key => {
@@ -55,7 +55,7 @@ class MetricsDisplay {
             "interface_sc": "Shape Complementarity",
             "interface_nres": "Interface Residues",
             "interface_interface_hbonds": "H-Bonds",
-            "linker_length": "Linker Length"
+            "binder_length": "Binder Length"
         };
         return names[key] || key;
     }

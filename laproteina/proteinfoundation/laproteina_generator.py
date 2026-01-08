@@ -357,7 +357,22 @@ class LaProteinaGenerator:
         """Internal method to run the actual generation."""
         from proteinfoundation.datasets.gen_dataset import GenDataset
         from proteinfoundation.utils.pdb_utils import write_prot_to_pdb
+        from proteinfoundation.utils.motif_utils import extract_motif_from_pdb
+        from proteinfoundation.utils.align_utils import mean_w_mask
         
+        # Calculate original center to un-center later and avoid jumps
+        # We use the same extraction logic as the dataset to find the exact center used for normalization
+        m_mask, x_m, _ = extract_motif_from_pdb(
+            motif_cfg.contig_string, 
+            motif_cfg.motif_pdb_path, 
+            motif_only=motif_cfg.motif_only,
+            atom_selection_mode=motif_cfg.atom_selection_mode,
+            coors_to_nm=False # Get center in Angstroms
+        )
+        # mean_w_mask returns [3] tensor
+        original_center = mean_w_mask(x_m.flatten(0, 1), m_mask.flatten(0, 1)).cpu().numpy()
+        logger.info(f"Original motif center: {original_center}. Will apply this offset to generated coordinates.")
+
         # Create output directory
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -397,13 +412,17 @@ class LaProteinaGenerator:
         for idx, pred in enumerate(predictions_flat):
             coors_atom37, residue_type = pred
             
+            # Un-center coordinates to match original PDB space
+            # coors_atom37 is [N, 37, 3]
+            coors_np = coors_atom37.float().detach().cpu().numpy()
+            coors_np = coors_np + original_center
+            
             # Use short ID if available (for evolution workflow), otherwise use original naming
             if motif_cfg.design_id:
                 dir_name = f"{motif_cfg.design_id}_sample_{idx:03d}"
             else:
-                # Match original generate.py directory and naming structure
-                # dir_name = f"job_{job_id}_id_{j}_motif_{motif_pdb_name}"
                 dir_name = f"job_0_id_{idx}_motif_{motif_pdb_name}"
+            
             sample_root_path = output_path / dir_name
             sample_root_path.mkdir(parents=True, exist_ok=True)
             
@@ -412,7 +431,7 @@ class LaProteinaGenerator:
             
             # Save PDB with original write_prot_to_pdb parameters
             write_prot_to_pdb(
-                prot_pos=coors_atom37.float().detach().cpu().numpy(),
+                prot_pos=coors_np,
                 aatype=residue_type.detach().cpu().numpy(),
                 file_path=str(pdb_path),
                 overwrite=True,

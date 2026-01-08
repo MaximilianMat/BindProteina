@@ -419,9 +419,9 @@ class IterativeOptimizer:
             # This allows for longer binders while still allowing some flexibility
             length = end - start + 1
             
-            # Calculate range: 85% to 155% of original length
+            # Calculate range: 85% to 135% of original length
             min_len = max(1, int(length * 0.85))  # At least 15% shorter binders
-            max_len = int(length * 1.55)  # Allow up to 55% longer binders
+            max_len = int(length * 1.35)  # Allow up to 35% longer binders
             
             contig_parts.append(f"{min_len}-{max_len}")
 

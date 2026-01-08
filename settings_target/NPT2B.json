@@ -1,9 +1,22 @@
 {
-    "design_path": "/nfs/homedirs/matscher/targets/npt2b",
-    "binder_name": "NPT2B",
-    "starting_pdb": "/nfs/homedirs/matscher/targets/npt2b/npt2b.pdb",
+    "input_dir": "/nfs/homedirs/matscher/samples/",
+    "output_dir": "/nfs/homedirs/matscher/samples/samples_npt2b",
+    "starting_pdb": "/nfs/homedirs/matscher/targets/npt2b_LP/npt2b.pdb",
     "chains": "A",
-    "target_hotspot_residues": "122-135,234-362,429-485",
-    "lengths": [40, 70],
-    "number_of_final_designs": 75
+    "binder_name": "NPT2B",
+    "target_hotspot_residues": "300-350",
+    "laproteina_settings": {
+        "checkpoint_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
+        "autoencoder_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt",
+        "n_samples": 30,
+        "batch_size": 2,
+        "binder_length_range": [
+            55,
+            100
+        ],
+        "target_length": 690,
+        "linker_length": 5,
+        "linker_sequence": "GGGGS",
+        "atom_selection_mode": "tip_atoms"
+    }
 }

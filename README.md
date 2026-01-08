@@ -125,7 +125,7 @@ Analyze your results using the interactive web dashboard.
 
 **Features**:
 - Interactive 3D structural comparison (AF2 vs. LaProteina vs. Relaxed).
-- Round-by-round metric histograms (i_pTM, pLDDT, Linker Length).
+- Round-by-round metric histograms (i_pTM, pLDDT, Binder Length).
 - Evolution animations to visualize conformational convergence.
 - Comprehensive scoring table with filtering and sorting.
 - Run Notes feature for tracking design observations.

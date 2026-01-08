@@ -58,7 +58,7 @@ class RoundStatistics {
                 max: -Infinity,
                 stdDev: 0
             },
-            linkerLength: {
+            binderLength: {
                 values: [],
                 average: 0,
                 median: 0,
@@ -104,10 +104,10 @@ class RoundStatistics {
                 stats.shapeComplementarity.values.push(sc);
             }
             
-            // Linker Length (try multiple possible field names)
-            const linkerLen = metrics.linker_length || metrics.linkerLength || metrics.link_length || metrics.linker_len;
-            if (linkerLen !== undefined && linkerLen !== null && !isNaN(linkerLen)) {
-                stats.linkerLength.values.push(linkerLen);
+            // Binder Length (try multiple possible field names)
+            const binderLen = metrics.binder_length || metrics.binderLength || metrics.linker_length || metrics.linkerLength;
+            if (binderLen !== undefined && binderLen !== null && !isNaN(binderLen)) {
+                stats.binderLength.values.push(binderLen);
             }
             
             // Count passing filters (assuming pass/fail/skip logic)
@@ -121,7 +121,7 @@ class RoundStatistics {
         });
         
         // Calculate statistics for each metric
-        ['i_pTM', 'pLDDT', 'dG', 'dSASA', 'shapeComplementarity', 'linkerLength'].forEach(metric => {
+        ['i_pTM', 'pLDDT', 'dG', 'dSASA', 'shapeComplementarity', 'binderLength'].forEach(metric => {
             const values = stats[metric].values;
             if (values.length > 0) {
                 // Sort for median calculation
@@ -235,7 +235,7 @@ class RoundStatistics {
         if (!allStats) return;
         
         // Store global min/max for each metric
-        ['i_pTM', 'pLDDT', 'dG', 'dSASA', 'shapeComplementarity', 'linkerLength'].forEach(metric => {
+        ['i_pTM', 'pLDDT', 'dG', 'dSASA', 'shapeComplementarity', 'binderLength'].forEach(metric => {
             if (allStats[metric] && allStats[metric].values.length > 0) {
                 this.globalRanges[metric] = {
                     min: allStats[metric].min,
@@ -308,7 +308,7 @@ class RoundStatistics {
                     ${this.createMetricSection('Binding Energy (dG)', stats.dG, '#e74c3c')}
                     ${this.createMetricSection('Buried Surface Area (dSASA)', stats.dSASA, '#f39c12')}
                     ${this.createMetricSection('Shape Complementarity', stats.shapeComplementarity, '#9b59b6')}
-                    ${this.createMetricSection('Linker Length', stats.linkerLength, '#16a085')}
+                    ${this.createMetricSection('Binder Length', stats.binderLength, '#16a085')}
                 </div>
             </div>
         `;
@@ -332,7 +332,7 @@ class RoundStatistics {
                 { key: 'i_pTM', label: 'i_pTM', color: '#3498db' },
                 { key: 'pLDDT', label: 'Average pLDDT', color: '#27ae60' },
                 { key: 'dG', label: 'Binding Energy (dG)', color: '#e74c3c' },
-                { key: 'linkerLength', label: 'Linker Length', color: '#16a085' }
+                { key: 'binderLength', label: 'Binder Length', color: '#16a085' }
             ];
             
             metricsToHistogram.forEach(({ key, label, color }) => {

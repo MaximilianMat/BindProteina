@@ -196,6 +196,7 @@ class LaProteinaScorer:
                  "design_name": design_name,
                  "model": model_id,
                  "sequence": binder_seq,
+                 "binder_length": len(binder_seq),
                  **af2_stats,
                  **interface_scores
              }

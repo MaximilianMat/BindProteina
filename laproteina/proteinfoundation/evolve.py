@@ -223,7 +223,8 @@ def main():
                     n_samples=args.n_samples_per_seed,
                     output_dir=str(generated_dir / f"{short_id}_evolved"),
                     contig_string=contig,
-                    linker_length=args.linker_length
+                    linker_length=args.linker_length,
+                    design_id=short_id
                 )
                 
             except Exception as e:
