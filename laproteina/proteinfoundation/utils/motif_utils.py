@@ -347,6 +347,10 @@ def extract_motif_from_pdb(
                                 x_motif[i, atom37_idx] = ang_to_nm(torch.as_tensor(atom.coord))
                             else:
                                 x_motif[i, atom37_idx] = torch.as_tensor(atom.coord)
+        # center motif
+        motif_center = mean_w_mask(x_motif.flatten(0, 1), motif_mask.flatten(0, 1)).unsqueeze(0)
+        x_motif = x_motif - motif_center
+        x_motif = x_motif * motif_mask[..., None]  # Is this needed?
         return motif_mask, x_motif, residue_type
 
 

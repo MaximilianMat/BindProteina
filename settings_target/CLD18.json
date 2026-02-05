@@ -1,6 +1,6 @@
 {
     "input_dir": "/nfs/homedirs/matscher/samples/",
-    "output_dir": "/nfs/homedirs/matscher/samples/results_cld18_long",
+    "output_dir": "/nfs/homedirs/matscher/samples/results_cld18_v2",
     "starting_pdb": "/nfs/homedirs/matscher/targets/cld18/cld18.pdb",
     "chains": "A",
     "binder_name": "CLD18",
@@ -8,7 +8,7 @@
     "laproteina_settings": {
         "checkpoint_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
         "autoencoder_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt",
-        "n_samples": 36,
+        "n_samples": 4,
         "batch_size": 4,
         "binder_length_range": [
             55,

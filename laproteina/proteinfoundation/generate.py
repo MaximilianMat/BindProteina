@@ -97,8 +97,8 @@ def setup(
     logger.info(" ".join(sys.argv))
 
     assert (
-        True
         #torch.cuda.is_available()
+        True
     ), "CUDA not available"  # Needed for ESMfold and designability
     logger.add(
         sys.stdout,
@@ -325,7 +325,7 @@ def save_motif_predictions(
         dir_name = f"job_{job_id}_id_{j}_motif_{motif_pdb_name}"
         samples_per_length[n] += 1
         sample_root_path = os.path.join(root_path, dir_name)
-        os.makedirs(sample_root_path, exist_ok=False)
+        os.makedirs(sample_root_path, exist_ok=True)
         fname = dir_name + ".pdb"
         pdb_path = os.path.join(sample_root_path, fname)
         write_prot_to_pdb(
@@ -339,10 +339,6 @@ def save_motif_predictions(
 
 def main():
     load_dotenv()
-
-    # Set matmul precision for performance on Tensor Cores
-    if torch.cuda.is_available():
-        torch.set_float32_matmul_precision('medium')
 
     # Parse arguments, load appropriate config, and set up root path
     args, cfg, config_name = parse_args_and_cfg()

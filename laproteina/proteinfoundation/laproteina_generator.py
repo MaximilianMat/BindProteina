@@ -11,14 +11,39 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 
+# Set dummy DATA_PATH if not set - needed for OmegaConf interpolation in model checkpoint
+if "DATA_PATH" not in os.environ:
+    os.environ["DATA_PATH"] = "."
+
 import torch
 import lightning as L
 from torch.utils.data import DataLoader
 from omegaconf import OmegaConf, DictConfig
 from loguru import logger
+import hydra
+from hydra import compose, initialize_config_dir
+from contextlib import contextmanager
 
-# Optimize for A100 Tensor Cores
-torch.set_float32_matmul_precision('medium')
+# Note: Removed torch.set_float32_matmul_precision('medium') - can cause numerical artifacts
+
+
+@contextmanager
+def hydra_config_context(config_dir: str):
+    """Context manager for Hydra config initialization."""
+    # Use GlobalHydra to check if already initialized
+    from hydra.core.global_hydra import GlobalHydra
+    
+    was_initialized = GlobalHydra.instance().is_initialized()
+    if was_initialized:
+        GlobalHydra.instance().clear()
+    
+    try:
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            yield
+    finally:
+        if was_initialized:
+            # Re-clear since we modified state
+            GlobalHydra.instance().clear()
 
 @dataclass
 class MotifConfig:
@@ -150,9 +175,70 @@ class LaProteinaGenerator:
         motif_config: MotifConfig,
         gen_config: GenerationConfig,
     ) -> DictConfig:
-        """Build OmegaConf config for generation."""
+        """
+        Build OmegaConf config for generation using Hydra composition.
         
-        # Build the config structure that GenDataset and Proteina expect
+        This uses the official LaProteina config files via Hydra to ensure
+        exact match with the expected config structure and defaults.
+        """
+        config_dir = str(self._config_dir.absolute())
+        
+        try:
+            # Try to use Hydra to load the official config
+            with hydra_config_context(config_dir):
+                # Load the motif generation config
+                cfg = compose(config_name="inference_motif_idx_tip")
+                
+                # Override with our specific settings
+                cfg.seed = gen_config.seed
+                cfg.generation.args.nsteps = gen_config.n_steps
+                cfg.generation.dataset.nsamples = gen_config.n_samples
+                cfg.generation.dataset.max_nsamples_per_batch = gen_config.max_batch_size
+                
+                # Set up our custom motif task
+                cfg.generation.dataset.motif_task_name = "BINDER_GENERATION"
+                
+                # Disable all metrics
+                cfg.generation.metric.compute_designability = False
+                cfg.generation.metric.compute_codesignability = False
+                cfg.generation.metric.compute_motif_rmsd = False
+                cfg.generation.metric.compute_novelty_pdb = False
+                cfg.generation.metric.compute_novelty_afdb = False
+                cfg.generation.metric.compute_fid = False
+                cfg.generation.metric.keep_folding_outputs = False
+                
+                # Add our custom motif configuration
+                OmegaConf.set_struct(cfg, False)
+                cfg.generation.dataset.motif_dict_cfg = {
+                    "BINDER_GENERATION": {
+                        "contig_string": motif_config.contig_string,
+                        "motif_pdb_path": motif_config.motif_pdb_path,
+                        "motif_only": motif_config.motif_only,
+                        "motif_min_length": motif_config.motif_min_length,
+                        "motif_max_length": motif_config.motif_max_length,
+                        "segment_order": motif_config.segment_order,
+                        "atom_selection_mode": motif_config.atom_selection_mode,
+                    }
+                }
+                OmegaConf.set_struct(cfg, True)
+                
+                logger.info("Config loaded via Hydra composition")
+                return cfg
+                
+        except Exception as e:
+            logger.warning(f"Failed to load config via Hydra: {e}")
+            logger.warning("Falling back to manual config construction")
+            return self._build_generation_config_manual(motif_config, gen_config)
+    
+    def _build_generation_config_manual(
+        self,
+        motif_config: MotifConfig,
+        gen_config: GenerationConfig,
+    ) -> DictConfig:
+        """
+        Fallback: Build config manually using OmegaConf.create().
+        Used when Hydra config loading fails.
+        """
         config = {
             "seed": gen_config.seed,
             "generation": {
@@ -164,24 +250,39 @@ class LaProteinaGenerator:
                     "fold_cond": False,
                     "guidance_w": 1.0,
                     "ag_ratio": 0.0,
+                    "ag_ckpt_path": None,
                     "save_trajectory_every": 0,
                 },
                 "model": {
                     "bb_ca": {
-                        "schedule": {"mode": "log", "p": 2.0},
-                        "gt": {"mode": "1/t", "p": 1.0, "clamp_val": None},
+                        "schedule": {
+                            "mode": "log",
+                            "p": 2.0,
+                        },
+                        "gt": {
+                            "mode": "1/t",
+                            "p": 1.0,
+                            "clamp_val": None,
+                        },
                         "simulation_step_params": {
                             "sampling_mode": "sc",
                             "sc_scale_noise": 0.1,
                             "sc_scale_score": 1.0,
                             "t_lim_ode": 0.98,
                             "t_lim_ode_below": 0.02,
-                            "center_every_step": False,  # Matched with inference_motif_idx_tip.yaml
+                            "center_every_step": False,
                         }
                     },
                     "local_latents": {
-                        "schedule": {"mode": "power", "p": 2.0},
-                        "gt": {"mode": "tan", "p": 1.0, "clamp_val": None},
+                        "schedule": {
+                            "mode": "power",
+                            "p": 2.0,
+                        },
+                        "gt": {
+                            "mode": "tan",
+                            "p": 1.0,
+                            "clamp_val": None,
+                        },
                         "simulation_step_params": {
                             "sampling_mode": "sc",
                             "sc_scale_noise": 0.1,
@@ -193,11 +294,11 @@ class LaProteinaGenerator:
                     }
                 },
                 "dataset": {
-                    "motif_task_name": "TARGET_BINDER_TIP",
+                    "motif_task_name": "BINDER_GENERATION",
                     "nsamples": gen_config.n_samples,
                     "max_nsamples_per_batch": gen_config.max_batch_size,
                     "motif_dict_cfg": {
-                        "TARGET_BINDER_TIP": {
+                        "BINDER_GENERATION": {
                             "contig_string": motif_config.contig_string,
                             "motif_pdb_path": motif_config.motif_pdb_path,
                             "motif_only": motif_config.motif_only,
@@ -223,14 +324,14 @@ class LaProteinaGenerator:
                     },
                 },
                 "metric": {
-                    "compute_designability": True,
+                    "compute_designability": False,
                     "compute_codesignability": False,
-                    "compute_motif_rmsd": True,
+                    "compute_motif_rmsd": False,
                     "compute_novelty_pdb": False,
                     "compute_novelty_afdb": False,
                     "compute_fid": False,
-                    "keep_folding_outputs": True,
-                    "designability_modes": ["ca", "bb3o"],
+                    "keep_folding_outputs": False,
+                    "metric_factory": None,
                 },
             }
         }
@@ -357,22 +458,7 @@ class LaProteinaGenerator:
         """Internal method to run the actual generation."""
         from proteinfoundation.datasets.gen_dataset import GenDataset
         from proteinfoundation.utils.pdb_utils import write_prot_to_pdb
-        from proteinfoundation.utils.motif_utils import extract_motif_from_pdb
-        from proteinfoundation.utils.align_utils import mean_w_mask
         
-        # Calculate original center to un-center later and avoid jumps
-        # We use the same extraction logic as the dataset to find the exact center used for normalization
-        m_mask, x_m, _ = extract_motif_from_pdb(
-            motif_cfg.contig_string, 
-            motif_cfg.motif_pdb_path, 
-            motif_only=motif_cfg.motif_only,
-            atom_selection_mode=motif_cfg.atom_selection_mode,
-            coors_to_nm=False # Get center in Angstroms
-        )
-        # mean_w_mask returns [3] tensor
-        original_center = mean_w_mask(x_m.flatten(0, 1), m_mask.flatten(0, 1)).cpu().numpy()
-        logger.info(f"Original motif center: {original_center}. Will apply this offset to generated coordinates.")
-
         # Create output directory
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -398,8 +484,6 @@ class LaProteinaGenerator:
         trainer = L.Trainer(
             accelerator=self.device if self.device != "cpu" else "cpu",
             devices=1,
-            logger=False,
-            enable_checkpointing=False,
         )
         predictions = trainer.predict(self.model, dataloader)
         
@@ -411,11 +495,6 @@ class LaProteinaGenerator:
         
         for idx, pred in enumerate(predictions_flat):
             coors_atom37, residue_type = pred
-            
-            # Un-center coordinates to match original PDB space
-            # coors_atom37 is [N, 37, 3]
-            coors_np = coors_atom37.float().detach().cpu().numpy()
-            coors_np = coors_np + original_center
             
             # Use short ID if available (for evolution workflow), otherwise use original naming
             if motif_cfg.design_id:
@@ -429,9 +508,9 @@ class LaProteinaGenerator:
             pdb_name = f"{dir_name}.pdb"
             pdb_path = sample_root_path / pdb_name
             
-            # Save PDB with original write_prot_to_pdb parameters
+            # Save PDB
             write_prot_to_pdb(
-                prot_pos=coors_np,
+                prot_pos=coors_atom37.float().detach().cpu().numpy(),
                 aatype=residue_type.detach().cpu().numpy(),
                 file_path=str(pdb_path),
                 overwrite=True,

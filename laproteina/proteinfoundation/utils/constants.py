@@ -44,7 +44,7 @@ SIDECHAIN_TIP_ATOMS = {
     "CYS": ["CA", "CB", "SG"],
     "GLU": ["CG", "CD", "OE1", "OE2"],
     "GLN": ["CG", "CD", "NE2", "OE1"],
-    "GLY": ["CA"],
+    "GLY": [],
     "HIS": ["CB", "CG", "CD2", "CE1", "ND1", "NE2"],
     "ILE": ["CB", "CG1", "CG2", "CD1"],
     "LEU": ["CB", "CG", "CD1", "CD2"],

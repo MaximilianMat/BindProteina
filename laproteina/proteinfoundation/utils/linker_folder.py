@@ -165,6 +165,19 @@ def fold_linked_pdb(
     # Cleanup
     if os.path.exists(af2_pdb):
         os.remove(af2_pdb)
+    
+    # Clear AF2 model from GPU memory
+    del af_model
+    clear_mem()
+    
+    # Also clear PyTorch cache
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("Cleared GPU memory after linker folding")
+    except ImportError:
+        pass
         
     logger.info(f"Successfully stitched linker to native target -> {output_pdb}")
     return output_pdb
