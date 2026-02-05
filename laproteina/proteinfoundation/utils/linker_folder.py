@@ -1,18 +1,25 @@
 import os
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from loguru import logger
+
 
 def fold_linked_pdb(
     target_pdb: str,
     linker_sequence: str,
     output_pdb: str,
     af_params_dir: Optional[str] = None
-) -> str:
+) -> Tuple[str, float]:
     """
     Use AlphaFold2 (via ColabDesign) to fold a linker onto a target PDB,
     then seamlessly "stitch" it to the original native target coordinates.
+    
+    Returns:
+        Tuple of (output_pdb_path, alignment_rmsd).
+        alignment_rmsd is the backbone RMSD between AF2-predicted target
+        portion and the native target after Kabsch alignment (in Angstroms).
+        Returns float('inf') if alignment failed.
     """
     try:
         from colabdesign import mk_afdesign_model, clear_mem
@@ -79,6 +86,8 @@ def fold_linked_pdb(
     folded_res_ids = np.unique(folded_bb.res_id)
     common_res_ids = np.intersect1d(native_res_ids, folded_res_ids)
     
+    alignment_rmsd = float('inf')
+    
     if len(common_res_ids) == 0:
         logger.warning("No common residues found for alignment. Using unaligned linker.")
         aligned_linker = folded_linker
@@ -130,6 +139,11 @@ def fold_linked_pdb(
                 folded_complex_coords = folded_complex.coord
                 transformed_coords = (folded_complex_coords @ R.T) + t
                 
+                # Calculate alignment RMSD on backbone atoms
+                aligned_folded_bb = (folded_bb_common.coord @ R.T) + t
+                diff = aligned_folded_bb - native_bb_common.coord
+                alignment_rmsd = float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
+                
                 # Create aligned structure
                 folded_complex_aligned = folded_complex.copy()
                 folded_complex_aligned.coord = transformed_coords
@@ -137,7 +151,7 @@ def fold_linked_pdb(
                 # Re-extract aligned linker
                 aligned_linker = folded_complex_aligned[np.isin(folded_complex_aligned.res_id, linker_res_ids)]
                 
-                logger.info(f"Successfully aligned linker using {len(common_res_ids)} common residues")
+                logger.info(f"Aligned linker using {len(common_res_ids)} common residues (RMSD={alignment_rmsd:.3f} Å)")
             except Exception as e:
                 logger.warning(f"Structural alignment failed: {e}. Falling back to unaligned prediction.")
                 aligned_linker = folded_linker
@@ -179,5 +193,5 @@ def fold_linked_pdb(
     except ImportError:
         pass
         
-    logger.info(f"Successfully stitched linker to native target -> {output_pdb}")
-    return output_pdb
+    logger.info(f"Successfully stitched linker to native target -> {output_pdb} (alignment RMSD={alignment_rmsd:.3f} Å)")
+    return output_pdb, alignment_rmsd

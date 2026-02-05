@@ -8,14 +8,14 @@
     "laproteina_settings": {
         "checkpoint_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
         "autoencoder_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt",
-        "n_samples": 8,
+        "n_samples": 24,
         "batch_size": 1,
         "binder_length_range": [
-            55,
-            100
+            30,
+            70
         ],
         "target_length": 690,
-        "linker_length_range": "2-50",
+        "linker_length_range": "5-15",
         "linker_sequence": "GGGGS",
         "atom_selection_mode": "tip_atoms"
     },

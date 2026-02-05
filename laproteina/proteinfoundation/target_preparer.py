@@ -4,12 +4,13 @@ Target Preparer for LaProteina V2 Pipeline
 Prepares target proteins with linkers for binder generation.
 
 Process:
-1. Extract the hotspot region from the target (e.g., res 300-350)
-2. Fold the linker onto the hotspot region using AF2
-3. Extract the linker coordinates from the folded structure
-4. Append linker to the FULL original target (numbered at end, positioned near hotspot)
-5. LaProteina sees: full target + floating linker in correct 3D position
-6. Post-processing: Remove linker from output for scoring
+1. Extract a LARGE focused region around the hotspot (max context for robust alignment)
+2. Fold the linker onto the focused region using AF2
+3. Align the AF2 result back to the full target coordinates
+4. If alignment RMSD > threshold, fall back to direct coordinate positioning
+5. Append positioned linker to the FULL original target
+6. LaProteina sees: full target + floating linker in correct 3D position
+7. Post-processing: Remove linker from output for scoring
 """
 
 import os
@@ -17,13 +18,18 @@ import tempfile
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Tuple, Optional, List, Sequence
+from typing import Tuple, Optional, List, Sequence, Dict
 from loguru import logger
 
 import biotite.structure as struc
 import biotite.structure.io as strucio
 
 from laproteina.proteinfoundation.linker_generator import LinkerConfig
+
+
+# RMSD threshold (Å). If alignment RMSD exceeds this, switch to direct
+# coordinate positioning instead of alignment-based placement.
+DEFAULT_RMSD_THRESHOLD = 3.0
 
 
 @dataclass
@@ -42,6 +48,9 @@ class PreparedTarget:
 class TargetPreparer:
     """
     Prepares target proteins with linkers for binder generation.
+    
+    Uses maximum context window for robust AF2 alignment, with automatic
+    fallback to direct coordinate positioning when alignment RMSD is too high.
     
     The linker is attached at the C-terminus of the full protein,
     ensuring LaProteina sees the complete protein context to avoid
@@ -64,7 +73,8 @@ class TargetPreparer:
         self,
         output_dir: str = "./prepared_targets",
         linker_mode: str = "polyglycine",
-        af_params_dir: Optional[str] = None
+        af_params_dir: Optional[str] = None,
+        rmsd_threshold: float = DEFAULT_RMSD_THRESHOLD,
     ):
         """
         Initialize the target preparer.
@@ -73,11 +83,14 @@ class TargetPreparer:
             output_dir: Directory to save prepared PDB files
             linker_mode: "polyglycine" for simple Gly linker, "af2" for AF2-folded linker
             af_params_dir: AlphaFold params directory (required if linker_mode="af2")
+            rmsd_threshold: RMSD threshold (Å) above which direct coordinate
+                            positioning is used instead of alignment-based placement
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.linker_mode = linker_mode
         self.af_params_dir = af_params_dir
+        self.rmsd_threshold = rmsd_threshold
         
         if linker_mode == "af2" and not af_params_dir:
             # Try to find default AF2 params
@@ -88,7 +101,8 @@ class TargetPreparer:
             else:
                 logger.warning("AF2 params not found. Set af_params_dir or use linker_mode='polyglycine'")
         
-        logger.info(f"TargetPreparer initialized with mode={linker_mode}, output_dir={output_dir}")
+        logger.info(f"TargetPreparer initialized with mode={linker_mode}, "
+                    f"rmsd_threshold={rmsd_threshold} Å, output_dir={output_dir}")
     
     def prepare_target_with_linker(
         self,
@@ -101,11 +115,12 @@ class TargetPreparer:
         Prepare a target PDB with a linker for LaProteina generation.
         
         Process:
-        1. Extract hotspot region from target (based on linker_config.hotspot_range)
-        2. Fold linker onto hotspot region using AF2
-        3. Extract linker coordinates from folded structure
-        4. Append linker to FULL original target (numbered at end, positioned near hotspot)
-        5. Result: full target + floating linker ready for LaProteina
+        1. Extract focused region from target (hotspot + large buffer for robust alignment)
+        2. Fold linker onto focused region using AF2
+        3. Align AF2 result to full target; check RMSD
+        4. If RMSD > threshold, fall back to direct coordinate positioning
+        5. Append positioned linker to FULL original target
+        6. Result: full target + floating linker ready for LaProteina
         
         Args:
             target_pdb: Path to the original target PDB
@@ -132,22 +147,33 @@ class TargetPreparer:
         
         # Get hotspot range from linker config
         hotspot_start, hotspot_end = linker_config.hotspot_range
+        hotspot_size = hotspot_end - hotspot_start + 1
         
         logger.info(f"Target {Path(target_pdb).name}: {target_length} residues, chain {chain_id}")
-        logger.info(f"Hotspot region: {hotspot_start}-{hotspot_end}")
+        logger.info(f"Hotspot region: {hotspot_start}-{hotspot_end} ({hotspot_size} residues)")
         logger.info(f"Linker config: attachment={linker_config.attachment_residue}, "
-                   f"length={linker_config.linker_length}, edge={linker_config.edge_type}")
+                    f"length={linker_config.linker_length}, position={linker_config.edge_type}")
         
-        # Step 1: Extract hotspot region
-        hotspot_structure = self._extract_hotspot_region(
-            full_target, hotspot_start, hotspot_end
+        # Step 1: Extract LARGE focused region around the attachment point
+        # Use maximum context: entire hotspot + 100 residues buffer on each side
+        max_context = min(hotspot_size + 200, target_length)
+        
+        focused_structure, res_id_mapping = self._extract_focused_region(
+            full_target,
+            linker_config.attachment_residue,
+            context_length=max_context,
         )
         
-        # Step 2: Fold linker onto hotspot region using AF2
-        folded_linker = self._fold_linker_on_hotspot(
-            hotspot_structure,
+        logger.info(f"Using maximum context window: {len(np.unique(focused_structure.res_id))} residues "
+                    f"(hotspot={hotspot_size}, buffer=±100, target={target_length})")
+        
+        # Step 2: Fold linker onto focused region using AF2
+        folded_linker, positioning_method = self._fold_linker_on_focused_region(
+            focused_structure,
+            full_target,
             linker_config,
-            target_pdb
+            res_id_mapping,
+            target_pdb,
         )
         
         # Step 3: Prepare the full target (renumber 1..N)
@@ -192,7 +218,8 @@ class TargetPreparer:
         
         logger.info(f"Prepared target saved: {output_path}")
         logger.info(f"  Full target: residues 1-{target_length}")
-        logger.info(f"  Linker: residues {linker_start_res}-{total_fixed_length} (floating near hotspot)")
+        logger.info(f"  Linker: residues {linker_start_res}-{total_fixed_length} "
+                    f"(positioned via {positioning_method})")
         logger.info(f"Contig string: {contig_string}")
         
         return PreparedTarget(
@@ -208,9 +235,274 @@ class TargetPreparer:
                 "binder_length_range": binder_length_range,
                 "linker_mode": self.linker_mode,
                 "hotspot_range": linker_config.hotspot_range,
-                "attachment_residue": linker_config.attachment_residue
+                "attachment_residue": linker_config.attachment_residue,
+                "positioning_method": positioning_method,
+                "context_length": len(np.unique(focused_structure.res_id)),
             }
         )
+    
+    def _extract_focused_region(
+        self,
+        structure: struc.AtomArray,
+        attachment_residue: int,
+        context_length: int = 250,
+    ) -> Tuple[struc.AtomArray, Dict[int, int]]:
+        """
+        Extract a large focused region centered on the attachment point.
+        
+        Unlike _extract_hotspot_region which only takes the hotspot,
+        this extracts the hotspot + large buffer for robust alignment.
+        Keeps original 3D coordinates but renumbers residues 1..N for AF2.
+        
+        Args:
+            structure: Full target structure.
+            attachment_residue: Residue ID where the linker attaches.
+            context_length: Total number of residues to include.
+            
+        Returns:
+            Tuple of (focused_structure, res_id_mapping) where res_id_mapping
+            maps new_res_id -> original_res_id for coordinate alignment.
+        """
+        all_res_ids = np.sort(np.unique(structure.res_id))
+        n_residues = len(all_res_ids)
+        
+        # Find attachment residue index
+        attachment_idx = np.searchsorted(all_res_ids, attachment_residue)
+        if attachment_idx >= n_residues or all_res_ids[attachment_idx] != attachment_residue:
+            # Find nearest residue
+            nearest_idx = np.argmin(np.abs(all_res_ids - attachment_residue))
+            logger.warning(
+                f"Attachment residue {attachment_residue} not found. "
+                f"Using nearest: {all_res_ids[nearest_idx]}"
+            )
+            attachment_idx = nearest_idx
+        
+        # Calculate extraction window centered on attachment point
+        half_context = context_length // 2
+        start_idx = max(0, attachment_idx - half_context)
+        end_idx = min(n_residues, attachment_idx + half_context + 1)
+        
+        # Adjust to fill context_length if near edges
+        actual_length = end_idx - start_idx
+        if actual_length < context_length:
+            if start_idx == 0:
+                end_idx = min(n_residues, context_length)
+            elif end_idx == n_residues:
+                start_idx = max(0, n_residues - context_length)
+        
+        focused_res_ids = all_res_ids[start_idx:end_idx]
+        
+        # Extract atoms for focused region
+        focused_mask = np.isin(structure.res_id, focused_res_ids)
+        focused = structure[focused_mask].copy()
+        
+        # Renumber 1..N for AF2 compatibility, keeping coordinate mapping
+        # res_id_mapping: {new_id: original_id}
+        res_id_mapping = {}
+        for new_id, old_id in enumerate(sorted(focused_res_ids), 1):
+            res_id_mapping[new_id] = int(old_id)
+            focused.res_id[focused.res_id == old_id] = new_id + 100000
+        focused.res_id = focused.res_id - 100000
+        
+        focused.chain_id[:] = "A"
+        
+        logger.info(
+            f"Extracted focused region: {len(focused_res_ids)} residues "
+            f"(original {focused_res_ids[0]}-{focused_res_ids[-1]}), "
+            f"centered on attachment residue {attachment_residue}"
+        )
+        
+        return focused, res_id_mapping
+    
+    def _fold_linker_on_focused_region(
+        self,
+        focused_structure: struc.AtomArray,
+        full_target: struc.AtomArray,
+        linker_config: LinkerConfig,
+        res_id_mapping: Dict[int, int],
+        original_pdb: str,
+    ) -> Tuple[struc.AtomArray, str]:
+        """
+        Fold a linker onto the focused region using AF2, then align
+        back to the full target.
+        
+        If alignment RMSD exceeds the threshold, falls back to direct
+        coordinate positioning using the attachment point.
+        
+        Args:
+            focused_structure: Large focused region (renumbered 1..N)
+            full_target: Full original target structure (original coordinates)
+            linker_config: Linker configuration
+            res_id_mapping: {new_res_id: original_res_id} from extraction
+            original_pdb: Path to original full target PDB
+            
+        Returns:
+            Tuple of (linker_atoms, positioning_method) where
+            positioning_method is "alignment" or "direct_coordinates".
+        """
+        from laproteina.proteinfoundation.utils.linker_folder import fold_linked_pdb
+        
+        # Save focused region to temp file
+        temp_focused = self.output_dir / f"temp_focused_{linker_config.config_id}.pdb"
+        strucio.save_structure(str(temp_focused), focused_structure)
+        
+        # Generate linker sequence (GSGSGS pattern for flexibility)
+        linker_length = linker_config.linker_length
+        linker_seq = "GS" * (linker_length // 2)
+        if linker_length % 2 == 1:
+            linker_seq += "G"
+        
+        # Fold linker with AF2
+        temp_folded = self.output_dir / f"temp_folded_{linker_config.config_id}.pdb"
+        
+        try:
+            logger.info(f"Folding {linker_length}-residue linker onto focused region "
+                       f"({len(np.unique(focused_structure.res_id))} residues)...")
+            
+            result = fold_linked_pdb(
+                target_pdb=str(temp_focused),
+                linker_sequence=linker_seq,
+                output_pdb=str(temp_folded),
+                af_params_dir=self.af_params_dir,
+            )
+            
+            # fold_linked_pdb returns (output_path, alignment_rmsd)
+            if isinstance(result, tuple):
+                _, alignment_rmsd = result
+            else:
+                # Backwards compatibility: old version returns just path
+                alignment_rmsd = float('inf')
+            
+            logger.info(f"AF2 folding alignment RMSD: {alignment_rmsd:.3f} Å")
+            
+            # Load the folded/stitched structure
+            folded = strucio.load_structure(str(temp_folded))
+            
+            # Extract just the linker portion (last N residues)
+            focused_len = len(np.unique(focused_structure.res_id))
+            all_res_ids = sorted(np.unique(folded.res_id))
+            linker_res_ids = all_res_ids[focused_len:]  # Linker is after focused region
+            
+            if not linker_res_ids:
+                raise ValueError("No linker residues found in folded structure")
+            
+            linker_mask = np.isin(folded.res_id, linker_res_ids)
+            linker_atoms = folded[linker_mask].copy()
+            
+            # Check alignment quality
+            if alignment_rmsd > self.rmsd_threshold:
+                logger.warning(
+                    f"Alignment RMSD ({alignment_rmsd:.3f} Å) exceeds threshold "
+                    f"({self.rmsd_threshold} Å). Using direct coordinate positioning."
+                )
+                linker_atoms = self._position_linker_by_coordinates(
+                    linker_atoms,
+                    full_target,
+                    linker_config.attachment_residue,
+                )
+                positioning_method = "direct_coordinates"
+            else:
+                logger.info(
+                    f"Alignment-based positioning (RMSD={alignment_rmsd:.3f} Å, "
+                    f"threshold={self.rmsd_threshold} Å)"
+                )
+                positioning_method = "alignment"
+            
+            logger.info(f"Extracted {len(linker_res_ids)} linker residues "
+                       f"(method: {positioning_method})")
+            return linker_atoms, positioning_method
+            
+        finally:
+            # Cleanup temp files
+            if temp_focused.exists():
+                temp_focused.unlink()
+            if temp_folded.exists():
+                temp_folded.unlink()
+    
+    def _position_linker_by_coordinates(
+        self,
+        linker: struc.AtomArray,
+        full_target: struc.AtomArray,
+        attachment_residue: int,
+    ) -> struc.AtomArray:
+        """
+        Position linker directly using attachment point coordinates.
+        
+        This bypasses alignment and places the linker's first residue
+        at the exact attachment point coordinate from the full target.
+        Used as fallback when Kabsch alignment RMSD is too high.
+        
+        The method translates the entire linker so that its attachment
+        atom (N of first residue or C of last residue, depending on 
+        which is closest to the target attachment point) coincides with
+        the CA atom of the attachment residue on the full target.
+        
+        Args:
+            linker: Linker structure from AF2
+            full_target: Full target structure (original coordinates)
+            attachment_residue: Residue ID on the target where linker attaches
+            
+        Returns:
+            Positioned linker structure
+        """
+        # Get attachment point CA coordinate from full target
+        attachment_mask = full_target.res_id == attachment_residue
+        target_ca = full_target[attachment_mask & (full_target.atom_name == "CA")]
+        
+        if len(target_ca) == 0:
+            # Try nearby residues
+            nearby_mask = np.abs(full_target.res_id - attachment_residue) <= 2
+            target_ca = full_target[nearby_mask & (full_target.atom_name == "CA")]
+            if len(target_ca) == 0:
+                raise ValueError(f"Could not find CA atom near residue {attachment_residue}")
+            # Use the closest one
+            target_ca = target_ca[:1]
+        
+        target_attach_coord = target_ca.coord[0]  # (3,)
+        
+        # Get linker attachment atom coordinates
+        linker_res_ids = sorted(np.unique(linker.res_id))
+        
+        # Try C-terminal of linker (last residue, C atom) — connects to target
+        last_res = linker_res_ids[-1]
+        last_c = linker[(linker.res_id == last_res) & (linker.atom_name == "C")]
+        
+        # Try N-terminal of linker (first residue, N atom) — connects to target  
+        first_res = linker_res_ids[0]
+        first_n = linker[(linker.res_id == first_res) & (linker.atom_name == "N")]
+        
+        # Pick whichever endpoint is closer to the target attachment point
+        candidates = []
+        if len(last_c) > 0:
+            dist_c = np.linalg.norm(last_c.coord[0] - target_attach_coord)
+            candidates.append((last_c.coord[0], dist_c, "C-terminal"))
+        if len(first_n) > 0:
+            dist_n = np.linalg.norm(first_n.coord[0] - target_attach_coord)
+            candidates.append((first_n.coord[0], dist_n, "N-terminal"))
+        
+        if not candidates:
+            # Fallback: use CA of first residue
+            first_ca = linker[(linker.res_id == first_res) & (linker.atom_name == "CA")]
+            if len(first_ca) == 0:
+                raise ValueError("Could not find any attachment atoms on linker")
+            candidates.append((first_ca.coord[0], 0.0, "CA-fallback"))
+        
+        # Sort by distance, pick closest
+        candidates.sort(key=lambda x: x[1])
+        linker_attach_coord, _, attach_type = candidates[0]
+        
+        # Calculate translation
+        translation = target_attach_coord - linker_attach_coord
+        
+        # Apply translation to entire linker
+        positioned_linker = linker.copy()
+        positioned_linker.coord = linker.coord + translation
+        
+        logger.info(
+            f"Direct coordinate positioning: translated {np.linalg.norm(translation):.3f} Å "
+            f"(attachment={attach_type}, target residue {attachment_residue})"
+        )
+        return positioned_linker
     
     def _extract_hotspot_region(
         self,
@@ -223,6 +515,9 @@ class TargetPreparer:
         
         Returns a new structure containing only the hotspot residues,
         renumbered from 1.
+        
+        Note: This is the original small-context extraction. For alignment,
+        use _extract_focused_region() which provides much more context.
         """
         # Get residues in the hotspot range
         res_ids = np.unique(structure.res_id)
@@ -244,67 +539,6 @@ class TargetPreparer:
         
         logger.info(f"Extracted hotspot region: {len(hotspot_res_ids)} residues")
         return hotspot
-    
-    def _fold_linker_on_hotspot(
-        self,
-        hotspot_structure: struc.AtomArray,
-        linker_config: LinkerConfig,
-        original_pdb: str
-    ) -> struc.AtomArray:
-        """
-        Fold a linker onto the hotspot region using AF2.
-        
-        Returns the linker portion only (not the hotspot), positioned
-        correctly in 3D space.
-        """
-        from laproteina.proteinfoundation.utils.linker_folder import fold_linked_pdb
-        
-        # Save hotspot to temp file
-        temp_hotspot = self.output_dir / f"temp_hotspot_{linker_config.config_id}.pdb"
-        strucio.save_structure(str(temp_hotspot), hotspot_structure)
-        
-        # Generate linker sequence (GSGSGS pattern for flexibility)
-        linker_length = linker_config.linker_length
-        linker_seq = "GS" * (linker_length // 2)
-        if linker_length % 2 == 1:
-            linker_seq += "G"
-        
-        # Fold linker with AF2
-        temp_folded = self.output_dir / f"temp_folded_{linker_config.config_id}.pdb"
-        
-        try:
-            logger.info(f"Folding {linker_length}-residue linker onto hotspot...")
-            fold_linked_pdb(
-                target_pdb=str(temp_hotspot),
-                linker_sequence=linker_seq,
-                output_pdb=str(temp_folded),
-                af_params_dir=self.af_params_dir
-            )
-            
-            # Load folded structure
-            folded = strucio.load_structure(str(temp_folded))
-            
-            # Extract just the linker portion (last N residues)
-            hotspot_len = len(np.unique(hotspot_structure.res_id))
-            all_res_ids = sorted(np.unique(folded.res_id))
-            linker_res_ids = all_res_ids[hotspot_len:]  # Linker is after hotspot
-            
-            if not linker_res_ids:
-                raise ValueError("No linker residues found in folded structure")
-            
-            # Extract linker atoms
-            linker_mask = np.isin(folded.res_id, linker_res_ids)
-            linker = folded[linker_mask].copy()
-            
-            logger.info(f"Extracted {len(linker_res_ids)} linker residues from folded structure")
-            return linker
-            
-        finally:
-            # Cleanup temp files
-            if temp_hotspot.exists():
-                temp_hotspot.unlink()
-            if temp_folded.exists():
-                temp_folded.unlink()
     
     def prepare_batch(
         self,
@@ -601,4 +835,3 @@ def batch_create_pyrosetta_input(
     
     logger.info(f"Created {len(pyrosetta_paths)}/{len(pdb_paths)} PyRosetta input files")
     return pyrosetta_paths
-

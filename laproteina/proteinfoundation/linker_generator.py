@@ -283,6 +283,8 @@ def validate_linker_configs(configs: List[LinkerConfig]) -> bool:
     - Non-empty list
     - Valid linker lengths (positive)
     - Valid attachment residues (positive)
+    - Valid edge_type (any non-empty string: "start", "end", or interior 
+      positions like "p25", "p50", "p75" from evenly distributed attachment points)
     
     Returns:
         True if all configs are valid
@@ -298,7 +300,7 @@ def validate_linker_configs(configs: List[LinkerConfig]) -> bool:
             raise ValueError(f"Invalid linker length {config.linker_length} in {config}")
         if config.attachment_residue <= 0:
             raise ValueError(f"Invalid attachment residue {config.attachment_residue} in {config}")
-        if config.edge_type not in ("start", "end"):
+        if not config.edge_type or not isinstance(config.edge_type, str):
             raise ValueError(f"Invalid edge type '{config.edge_type}' in {config}")
     
     return True

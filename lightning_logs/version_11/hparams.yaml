@@ -1,0 +1,308 @@
+cfg_exp:
+  nn:
+    name: local_latents_transformer
+    output_parameterization:
+      bb_ca: v
+      local_latents: v
+    nlayers: 14
+    token_dim: 768
+    nheads: 12
+    parallel_mha_transition: false
+    strict_feats: false
+    feats_seq:
+    - xt_bb_ca
+    - xt_local_latents
+    - x_sc_bb_ca
+    - x_sc_local_latents
+    - optional_ca_coors_nm_seq_feat
+    - optional_res_type_seq_feat
+    - x_motif
+    feats_cond_seq:
+    - time_emb_bb_ca
+    - time_emb_local_latents
+    dim_cond: 256
+    idx_emb_dim: 256
+    t_emb_dim: 256
+    feats_pair_repr:
+    - rel_seq_sep
+    - xt_bb_ca_pair_dists
+    - x_sc_bb_ca_pair_dists
+    - optional_ca_pair_dist
+    feats_pair_cond:
+    - time_emb_bb_ca
+    - time_emb_local_latents
+    xt_pair_dist_dim: 30
+    xt_pair_dist_min: 0.1
+    xt_pair_dist_max: 3
+    x_sc_pair_dist_dim: 30
+    x_sc_pair_dist_min: 0.1
+    x_sc_pair_dist_max: 3
+    seq_sep_dim: 127
+    pair_repr_dim: 256
+    update_pair_repr: false
+    update_pair_repr_every_n: 3
+    use_tri_mult: false
+    use_qkln: true
+  generation:
+    args:
+      nsteps: 200
+      self_cond: false
+      fold_cond: false
+      guidance_w: 1.0
+      ag_ratio: 0.0
+      ag_ckpt_path: null
+    dataset:
+      nlens_cfg:
+        nres_lens:
+        - 50
+        - 100
+        - 150
+        - 200
+        - 250
+        min_len: null
+        max_len: null
+        step_len: null
+      cath_codes: null
+      nsamples: 20
+      max_nsamples_per_batch: 5
+      empirical_distribution_cfg:
+        len_cath_code_path: null
+        cath_code_level: null
+        bucket_min_len: 50
+        bucket_max_len: 274
+        bucket_step_size: 25
+    model:
+      ode:
+        bb_ca:
+          schedule:
+            mode: uniform
+            p: 1.0
+          gt:
+            mode: tan
+            p: 1.0
+            clamp_val: null
+          simulation_step_params:
+            sampling_mode: vf
+            sc_scale_noise: 0.0
+            sc_scale_score: 0.0
+            t_lim_ode: 0.98
+        local_latents:
+          schedule:
+            mode: uniform
+            p: 1.0
+          gt:
+            mode: tan
+            p: 1.0
+            clamp_val: null
+          simulation_step_params:
+            sampling_mode: vf
+            sc_scale_noise: 0.0
+            sc_scale_score: 0.0
+            t_lim_ode: 0.98
+      temp_035_only_ca:
+        bb_ca:
+          schedule:
+            mode: uniform
+            p: 1.0
+          gt:
+            mode: tan
+            p: 1.0
+            clamp_val: null
+          simulation_step_params:
+            sampling_mode: sc
+            sc_scale_noise: 0.35
+            sc_scale_score: 1.0
+            t_lim_ode: 0.98
+        local_latents:
+          schedule:
+            mode: uniform
+            p: 1.0
+          gt:
+            mode: tan
+            p: 1.0
+            clamp_val: null
+          simulation_step_params:
+            sampling_mode: vf
+            sc_scale_noise: 0.0
+            sc_scale_score: 0.0
+            t_lim_ode: 0.98
+      temp_035_all:
+        bb_ca:
+          schedule:
+            mode: uniform
+            p: 1.0
+          gt:
+            mode: tan
+            p: 1.0
+            clamp_val: null
+          simulation_step_params:
+            sampling_mode: sc
+            sc_scale_noise: 0.35
+            sc_scale_score: 1.0
+            t_lim_ode: 0.98
+        local_latents:
+          schedule:
+            mode: uniform
+            p: 1.0
+          gt:
+            mode: tan
+            p: 1.0
+            clamp_val: null
+          simulation_step_params:
+            sampling_mode: sc
+            sc_scale_noise: 0.35
+            sc_scale_score: 1.0
+            t_lim_ode: 0.98
+    metric:
+      compute_designability: false
+      compute_novelty_pdb: false
+      compute_novelty_afdb: false
+      compute_fid: true
+      metric_factory:
+      - metrics:
+        - FID
+        - fJSD_C
+        - fJSD_A
+        - fJSD_T
+        ckpt_path: ./metric_factory/model_weights/gearnet_ca.pth
+        real_features_path: ./metric_factory/features/pdb_eval_ca_features.pth
+        ca_only: true
+        prefix: PDB_
+      - metrics:
+        - FID
+        - fJSD_C
+        - fJSD_A
+        - fJSD_T
+        ckpt_path: ./metric_factory/model_weights/gearnet_ca.pth
+        real_features_path: ./metric_factory/features/afdb_eval_ca_features.pth
+        ca_only: true
+        prefix: AFDB_
+      - metrics:
+        - IS_C
+        - IS_A
+        - IS_T
+        ckpt_path: ./metric_factory/model_weights/gearnet_ca.pth
+        ca_only: true
+  dataset:
+    database_name: afdb_rep_v4
+    datamodule:
+      _target_: proteinfoundation.datasets.foldcomp_data.FoldCompLightningDataModule
+      data_dir: ./afdb_rep_v4/
+      database: afdb_rep_v4
+      batch_padding: true
+      sampling_mode: random
+      transforms:
+      - _target_: proteinfoundation.datasets.transforms.CenterStructureTransform
+      - _target_: proteinfoundation.datasets.transforms.GlobalRotationTransform
+      - _target_: proteinfoundation.datasets.transforms.OpenFoldFrameTransform
+      - _target_: proteinfoundation.datasets.transforms.ChainBreakPerResidueTransform
+      - _target_: proteinfoundation.datasets.transforms.MotifMaskTransform
+        atom_selection_mode: all
+        motif_max_pct_res: 0.3
+        motif_prob: 1.0
+      - _target_: proteinfoundation.datasets.transforms.CoordsToNanometers
+      batch_size: 16
+      num_workers: 24
+      pin_memory: true
+      dataselector:
+        _target_: proteinfoundation.datasets.foldcomp_data.FoldCompDataSelector
+        database: afdb_rep_v4
+        data_dir: ./afdb_rep_v4/
+        fraction: 1.0
+        min_length: 32
+        max_length: 256
+        min_plddt_avg: 80
+        max_plddt_avg: 100
+        min_plddt_std: null
+        max_plddt_std: null
+        max_loop_prop: null
+        max_loop_consec: null
+        num_workers: 32
+      datasplitter:
+        _target_: proteinfoundation.datasets.foldcomp_data.FoldCompDataSplitter
+        train_val_test:
+        - 0.998
+        - 0.0019
+        - 0.0001
+        split_type: random
+        split_sequence_similarity: 0.3
+        overwrite_sequence_clusters: false
+        num_workers: 64
+  run_name_: PL_motifaa_partial_sc
+  hardware:
+    ncpus_per_task_train_: 24
+    ncpus_per_task_prepro_: 32
+    accelerator: gpu
+    ngpus_per_node_: 8
+    nnodes_: 8
+  pretrain_ckpt_path: null
+  product_flowmatcher:
+    bb_ca:
+      zero_com: false
+      guidance_enabled: true
+    local_latents:
+      zero_com: false
+      guidance_enabled: true
+      encode_with_mean: false
+      autoencoder_ckpt_path: /lustre/fsw/portfolios/nvr/users/tgeffner/PFM_runs/AEF_kl4_z8_allfeats_8gpus/store/AEF_kl4_z8_allfeats_8gpus/checkpoints/chk_epoch=00000095_step=000000500000-EMA.ckpt
+  motif_loss:
+    use_for_training: true
+    w_seq: 2.0
+    w_struct: 2.0
+    t_lim_bb_ca: 0.5
+    t_lim_local_latents: 0.5
+  loss:
+    t_distribution:
+      bb_ca:
+        name: mix_unif_beta
+        p1: 1.9
+        p2: 1.0
+        p3: 0.02
+      local_latents:
+        name: uniform
+        p1: 1.0
+        p2: 1.0
+      shared_groups: null
+  force_precision_f32: true
+  training:
+    n_recycle: 0
+    motif_conditioning: true
+    self_cond: true
+    fold_cond: false
+    mask_T_prob: 0.5
+    mask_A_prob: 0.5
+    mask_C_prob: 0.5
+    fold_label_sample_ratio:
+    - 0.5
+    - 0.1
+    - 0.15
+    - 0.25
+    p_folding_n_inv_folding_iters: 0.0
+  lora:
+    r: null
+    lora_alpha: 32.0
+    lora_dropout: 0.0
+    train_bias: none
+  opt:
+    lr: 0.0001
+    max_epochs: 10000000
+    accumulate_grad_batches: 1
+    skip_nan_grad: true
+    grad_and_weight_analysis: false
+    dist_strategy: ddp
+    val_check_interval: 5000
+  log:
+    wandb_project: pfm_local_latents_motifaa
+    log_wandb: true
+    log_every_n_steps: 10
+    checkpoint: true
+    checkpoint_every_n_steps: 10000
+    last_ckpt_every_n_steps: 1500
+  seed: 42
+  ema:
+    decay: 0.999
+    validate_original_weights: false
+    every_n_steps: 1
+    cpu_offload: false
+store_dir: null
+autoencoder_ckpt_path: /nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt
