@@ -55,7 +55,7 @@ class MotifConfig:
     motif_min_length: int = 50
     motif_max_length: int = 150
     segment_order: str = "A"
-    atom_selection_mode: str = "tip_atoms"  # tip_atoms, all_atom, ca_only, backbone
+    atom_selection_mode: str = "all_atom"  # all_atom (LD4), tip_atoms (LD5), ca_only, backbone
     design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
 
 
@@ -79,8 +79,9 @@ class LaProteinaGenerator:
     
     Example:
         generator = LaProteinaGenerator(
-            checkpoint_path="checkpoints_laproteina/LD5_motif_idx_tip.ckpt",
-            autoencoder_path="checkpoints_laproteina/AE3_motif.ckpt"
+            checkpoint_path="checkpoints_laproteina/LD4_motif_idx_aa.ckpt",
+            autoencoder_path="checkpoints_laproteina/AE3_motif.ckpt",
+            laproteina_mode="all_atom",  # "all_atom" for LD4, "tip_atom" for LD5
         )
         
         pdbs = generator.generate_binder(
@@ -92,12 +93,25 @@ class LaProteinaGenerator:
         )
     """
     
+    # Map from laproteina_mode to Hydra config name
+    MODE_CONFIG_MAP = {
+        "all_atom": "inference_motif_idx_aa",
+        "tip_atom": "inference_motif_idx_tip",
+    }
+    
+    # Map from laproteina_mode to atom_selection_mode used in motif data processing
+    MODE_ATOM_SELECTION_MAP = {
+        "all_atom": "all_atom",
+        "tip_atom": "tip_atoms",
+    }
+    
     def __init__(
         self,
         checkpoint_path: str,
         autoencoder_path: Optional[str] = None,
         base_config_path: Optional[str] = None,
         device: str = "cuda",
+        laproteina_mode: str = "all_atom",
     ):
         """
         Initialize the generator by loading model weights.
@@ -107,12 +121,27 @@ class LaProteinaGenerator:
             autoencoder_path: Path to autoencoder checkpoint (.ckpt), if using latent model
             base_config_path: Optional path to base config directory
             device: Device to run on ("cuda" or "cpu")
+            laproteina_mode: "all_atom" for LD4 model, "tip_atom" for LD5 model.
+                Controls which Hydra config, feature factory class, and atom selection
+                mode are used.
         """
+        if laproteina_mode not in self.MODE_CONFIG_MAP:
+            raise ValueError(
+                f"Unknown laproteina_mode: {laproteina_mode!r}. "
+                f"Supported: {list(self.MODE_CONFIG_MAP.keys())}"
+            )
+        
+        self.laproteina_mode = laproteina_mode
         self.checkpoint_path = Path(checkpoint_path)
         self.autoencoder_path = Path(autoencoder_path) if autoencoder_path else None
         self.device = device
         self.model = None
         self._base_config = None
+        
+        # Set the feature factory module-level variable BEFORE model loading
+        import proteinfoundation.nn.feature_factory as ff
+        ff.MOTIF_ATOM_MODE = laproteina_mode
+        logger.info(f"Set MOTIF_ATOM_MODE = {laproteina_mode!r}")
         
         # Resolve config path relative to this file or use provided
         if base_config_path:
@@ -128,7 +157,11 @@ class LaProteinaGenerator:
         if self.autoencoder_path and not self.autoencoder_path.exists():
             raise FileNotFoundError(f"Autoencoder checkpoint not found: {self.autoencoder_path}")
         
-        logger.info(f"LaProteinaGenerator initialized with checkpoint: {self.checkpoint_path}")
+        logger.info(
+            f"LaProteinaGenerator initialized: mode={laproteina_mode}, "
+            f"config={self.MODE_CONFIG_MAP[laproteina_mode]}, "
+            f"checkpoint={self.checkpoint_path}"
+        )
     
     def _load_model(self):
         """Load the model if not already loaded."""
@@ -186,8 +219,10 @@ class LaProteinaGenerator:
         try:
             # Try to use Hydra to load the official config
             with hydra_config_context(config_dir):
-                # Load the motif generation config
-                cfg = compose(config_name="inference_motif_idx_tip")
+                # Load the motif generation config based on laproteina_mode
+                config_name = self.MODE_CONFIG_MAP[self.laproteina_mode]
+                logger.info(f"Loading Hydra config: {config_name}")
+                cfg = compose(config_name=config_name)
                 
                 # Override with our specific settings
                 cfg.seed = gen_config.seed
@@ -346,7 +381,7 @@ class LaProteinaGenerator:
         target_chain: str = "A",
         n_samples: int = 28,  # Match motif.yaml default
         output_dir: str = "./generated_binders",
-        atom_selection_mode: str = "tip_atoms",
+        atom_selection_mode: Optional[str] = None,
         n_steps: int = 400,  # Match inference_base.yaml default
         seed: int = 5,       # Match inference_base.yaml default
         linker_length: int = 0,
@@ -364,7 +399,8 @@ class LaProteinaGenerator:
             target_chain: Chain ID of target in PDB (default "A")
             n_samples: Number of binder candidates to generate
             output_dir: Directory to save generated PDBs
-            atom_selection_mode: Atom selection for motif conditioning
+            atom_selection_mode: Atom selection for motif conditioning.
+                If None, automatically set based on laproteina_mode.
             n_steps: Number of diffusion steps
             seed: Random seed for reproducibility
             contig_string: Optional custom contig string (e.g. A1-100/10-20/A120-150)
@@ -373,6 +409,9 @@ class LaProteinaGenerator:
         Returns:
             List of paths to generated PDB files
         """
+        # Default atom_selection_mode based on laproteina_mode
+        if atom_selection_mode is None:
+            atom_selection_mode = self.MODE_ATOM_SELECTION_MAP[self.laproteina_mode]
         # Ensure model is loaded
         self._load_model()
         

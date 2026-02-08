@@ -19,6 +19,14 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 ################################
+# Motif atom mode setting      #
+# Set before model loading:    #
+#   "all_atom" for LD4 model   #
+#   "tip_atom" for LD5 model   #
+################################
+MOTIF_ATOM_MODE = "all_atom"
+
+################################
 # # Some auxiliary functions # #
 ################################
 
@@ -1838,20 +1846,16 @@ class FeatureFactory(torch.nn.Module):
                 return MotifMaskSeqFeat(**kwargs)
             
             #######################################################
-            # Some manual changes needed here for the motif task
+            # Motif atom mode: controlled by MOTIF_ATOM_MODE
+            # Set to "all_atom" for LD4 model, "tip_atom" for LD5 model
             #######################################################
 
-            # # Uncomment this for indexed + tip atom
             elif f == "x_motif":
-                return XmotifBulkTipSeqFeat(**kwargs)
-
-            # Uncomment this for any other motif task
-            #elif f == "bulk_all_atom_xmotif" or f == "x_motif":
-            #    return BulkAllAtomXmotifSeqFeat(**kwargs)
-            
-            #######################################################
-            #######################################################
-            #######################################################
+                if MOTIF_ATOM_MODE == "tip_atom":
+                    return XmotifBulkTipSeqFeat(**kwargs)
+                else:
+                    # all_atom mode (default for LD4 and other models)
+                    return BulkAllAtomXmotifSeqFeat(**kwargs)
 
             elif f == "bulk_all_atom_xmotif":
                 return BulkAllAtomXmotifSeqFeat(**kwargs)

@@ -5,8 +5,8 @@
 #SBATCH --partition=gpu_a100,gpu_h100
 #SBATCH --qos=default
 #SBATCH --gres=gpu:1
-#SBATCH --mem 80gb
-#SBATCH --time 10:00:00
+#SBATCH --mem 40gb
+#SBATCH --time 24:00:00
 #SBATCH --output=laproteina_generate_%A.log
 
 # Initialise environment and modules

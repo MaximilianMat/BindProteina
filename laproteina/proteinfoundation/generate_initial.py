@@ -4,8 +4,9 @@ Initial Sample Generation for LaProteina V2 Pipeline
 Generates a diverse pool of initial binder candidates with:
 - Multiple linker configurations (varying lengths and attachment edges)
 - Full protein context for collision-free generation
-- Rosetta pre-filtering to eliminate poor designs
-- AF2 scoring for final candidate selection
+- Quick Rosetta pre-scoring (no relaxation) for baseline metrics
+- AF2 re-prediction and full Rosetta scoring for all samples
+- Binder position overlap metric (Jaccard) to detect position drift
 
 Usage:
     python generate_initial.py --settings settings_generation/my_target.json
@@ -20,9 +21,10 @@ import sys
 import json
 import subprocess
 import torch
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from loguru import logger
 
 # Adjust path to import BindProteina modules
@@ -41,7 +43,6 @@ from laproteina.proteinfoundation.target_preparer import (
     create_pyrosetta_input
 )
 from laproteina.proteinfoundation.laproteina_generator import LaProteinaGenerator
-from laproteina_scoring.rosetta_prefilter import RosettaPreFilter, PrefilterResult
 
 
 def load_settings(settings_path: str) -> Dict:
@@ -103,6 +104,38 @@ def collect_all_pdbs(output_dir: Path) -> List[str]:
     return pdbs
 
 
+def compute_interface_overlap(pre_residues_str: str, post_residues_str: str) -> float:
+    """
+    Compute Jaccard overlap of target interface residue sets.
+    
+    Compares the set of target (chain A) residues at the interface before AF2
+    and after AF2. A low overlap indicates the binder moved to a different region
+    of the target during AF2 re-prediction.
+    
+    Args:
+        pre_residues_str: Comma-separated target interface residue numbers (pre-AF2).
+        post_residues_str: Comma-separated target interface residue numbers (post-AF2).
+        
+    Returns:
+        Jaccard similarity (0.0 - 1.0). 0.0 means no overlap, 1.0 means identical sets.
+    """
+    if not pre_residues_str or not post_residues_str:
+        return 0.0
+    
+    try:
+        pre_set = set(int(r.strip()) for r in str(pre_residues_str).split(",") if r.strip())
+        post_set = set(int(r.strip()) for r in str(post_residues_str).split(",") if r.strip())
+    except (ValueError, TypeError):
+        return 0.0
+    
+    if not pre_set or not post_set:
+        return 0.0
+    
+    intersection = pre_set & post_set
+    union = pre_set | post_set
+    return len(intersection) / len(union) if union else 0.0
+
+
 def main():
     # Set matmul precision for performance on Tensor Cores
     if torch.cuda.is_available():
@@ -118,14 +151,9 @@ def main():
         help="Path to JSON settings file (e.g., settings_generation/my_target.json)"
     )
     parser.add_argument(
-        "--skip_prefilter",
-        action="store_true",
-        help="Skip Rosetta pre-filtering (not recommended)"
-    )
-    parser.add_argument(
         "--skip_scoring",
         action="store_true",
-        help="Skip AF2 scoring (generate and pre-filter only)"
+        help="Skip AF2 scoring (generate only)"
     )
     
     args = parser.parse_args()
@@ -166,32 +194,44 @@ def main():
     linker_mode = settings.get("linker_generation_mode", "round_robin")
     
     binder_length_range = tuple(lp_settings.get("binder_length_range", [40, 80]))
-    # n_samples is the TOTAL number of samples (distributed across configs)
+    # n_samples is the TOTAL number of samples (distributed evenly across linker starting points)
     n_total_samples = lp_settings.get("n_samples", 50)
     # batch_size for generation (affects GPU memory usage)
     batch_size = lp_settings.get("batch_size", 2)
-    
-    prefilter_settings_path = settings.get(
-        "rosetta_prefilter_settings", 
-        "settings_filters/laProteina_filters.json"
+    # n_linker_starting_points: number of different linker attachment positions.
+    # Total samples are split evenly among starting points.
+    # e.g., n_samples=24, n_linker_starting_points=4 → 6 samples per starting point
+    # Check laproteina_settings first, then top-level n_linker_configs for backwards compat
+    n_linker_starting_points = lp_settings.get(
+        "n_linker_starting_points",
+        settings.get("n_linker_configs", min(n_total_samples, 8))
     )
-    # Enable PyRosetta relaxation before scoring (improves metrics but slower)
-    do_rosetta_relax = settings.get("rosetta_relax", True)
+    # Ensure we don't have more starting points than samples
+    n_linker_starting_points = min(n_linker_starting_points, n_total_samples)
+    
+    samples_per_starting_point = n_total_samples // n_linker_starting_points
+    remainder_samples = n_total_samples % n_linker_starting_points
+    
     device = settings.get("device", "cuda")
     
-    # Number of linker configs: we'll generate one config per sample batch
-    # Each batch uses a different linker config (cycling through)
-    n_linker_configs = settings.get("n_linker_configs", min(n_total_samples, 8))
+    # LaProteina mode: "all_atom" (LD4) or "tip_atom" (LD5)
+    # Controls which model config, feature factory class, and atom selection are used
+    laproteina_mode = lp_settings.get("laproteina_mode", "all_atom")
+    if laproteina_mode not in ("all_atom", "tip_atom"):
+        logger.error(f"Invalid laproteina_mode: {laproteina_mode!r}. Must be 'all_atom' or 'tip_atom'")
+        sys.exit(1)
     
     logger.info(f"Settings:")
     logger.info(f"  target_pdb: {target_pdb}")
     logger.info(f"  checkpoint: {checkpoint}")
+    logger.info(f"  laproteina_mode: {laproteina_mode}")
     logger.info(f"  linker_length_range: {linker_length_range}")
     logger.info(f"  n_total_samples: {n_total_samples}")
-    logger.info(f"  n_linker_configs: {n_linker_configs}")
+    logger.info(f"  n_linker_starting_points: {n_linker_starting_points}")
+    logger.info(f"  samples_per_starting_point: {samples_per_starting_point}" +
+               (f" (+1 for first {remainder_samples})" if remainder_samples else ""))
     logger.info(f"  binder_length_range: {binder_length_range}")
     logger.info(f"  batch_size: {batch_size}")
-    logger.info(f"  rosetta_relax: {do_rosetta_relax}")
     
     # Create output directory
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
@@ -231,10 +271,10 @@ def main():
         hotspot_string=hotspot_string,
         linker_length_range=linker_length_range,
         mode=linker_mode,
-        n_attachment_points=n_linker_configs  # Distribute attachment points based on config count
+        n_attachment_points=n_linker_starting_points  # Evenly space attachment points across hotspot
     )
     
-    linker_configs = linker_generator.generate_configs(n_linker_configs)
+    linker_configs = linker_generator.generate_configs(n_linker_starting_points)
     logger.info(f"Generated {len(linker_configs)} linker configurations")
     logger.info(linker_generator.get_edge_summary())
     
@@ -302,29 +342,30 @@ def main():
     generator = LaProteinaGenerator(
         checkpoint_path=str(ckpt_path),
         autoencoder_path=str(ae_path) if ae_path.exists() else None,
-        device=device
+        device=device,
+        laproteina_mode=laproteina_mode,
     )
     generator._load_model()  # Preload model
     
     generated_dir = output_dir / "generated"
     generated_dir.mkdir(exist_ok=True)
     
-    # Distribute total samples across configs (one config per batch)
+    # Distribute total samples evenly across linker starting points
     n_configs = len(prepared_targets)
     samples_per_config = n_total_samples // n_configs
     remainder = n_total_samples % n_configs
     
-    logger.info(f"Distributing {n_total_samples} samples across {n_configs} configs")
-    logger.info(f"  Base samples per config: {samples_per_config}")
-    logger.info(f"  Remainder (extra samples for first configs): {remainder}")
+    logger.info(f"Distributing {n_total_samples} samples across {n_configs} linker starting points")
+    logger.info(f"  Samples per starting point: {samples_per_config}" +
+               (f" (+1 for first {remainder})" if remainder else ""))
     
     all_generated_pdbs = []
     for idx, prepared_target in enumerate(prepared_targets):
-        # First 'remainder' configs get one extra sample
+        # First 'remainder' starting points get one extra sample
         n_samples_this_config = samples_per_config + (1 if idx < remainder else 0)
         
         if n_samples_this_config == 0:
-            logger.info(f"Config {idx}: Skipping (no samples allocated)")
+            logger.info(f"Starting point {idx}: Skipping (no samples allocated)")
             continue
             
         pdbs = generate_samples_for_config(
@@ -336,7 +377,7 @@ def main():
             max_batch_size=batch_size
         )
         all_generated_pdbs.extend(pdbs)
-        logger.info(f"Config {idx}: Generated {len(pdbs)} samples (total: {len(all_generated_pdbs)})")
+        logger.info(f"Starting point {idx}: Generated {len(pdbs)} samples (total: {len(all_generated_pdbs)})")
         
         # Clear GPU cache between configs to prevent memory fragmentation
         if torch.cuda.is_available():
@@ -352,53 +393,11 @@ def main():
     logger.info(f"Collected {len(all_generated_pdbs)} PDB files from {generated_dir}")
     
     # =========================================================================
-    # Phase 4: Rosetta Pre-Filtering
+    # Phase 4: Remove Linker & Prepare for Scoring
     # =========================================================================
-    if not args.skip_prefilter:
+    if all_generated_pdbs:
         logger.info("=" * 60)
-        logger.info("Phase 4: Rosetta Pre-Filtering")
-        logger.info("=" * 60)
-        
-        # Resolve prefilter settings path
-        prefilter_settings_full = fix_path(prefilter_settings_path)
-        if not os.path.isabs(prefilter_settings_full):
-            repo_root = Path(__file__).parent.parent.parent
-            prefilter_settings_full = str(repo_root / prefilter_settings_full)
-        
-        prefilter_output_dir = output_dir / "prefilter_results"
-        
-        # Determine target+linker length for chain splitting
-        # Use the first prepared target's total_fixed_length as reference
-        if prepared_targets:
-            split_point = prepared_targets[0].total_fixed_length
-        else:
-            split_point = target_length  # Fallback
-        
-        prefilter = RosettaPreFilter(
-            filter_settings_path=prefilter_settings_full,
-            do_relax=do_rosetta_relax,
-            hotspot_residues=hotspot_string  # Filter for binders interacting with hotspot region
-        )
-        
-        prefilter_result = prefilter.prefilter_batch(
-            pdb_paths=all_generated_pdbs,
-            target_len=split_point,
-            output_dir=str(prefilter_output_dir),
-            save_split_pdbs=True  # Save split PDBs for inspection
-        )
-        
-        passing_pdbs = prefilter_result.passing_pdbs
-        logger.info(f"Pre-filter: {len(passing_pdbs)}/{len(all_generated_pdbs)} passed")
-    else:
-        logger.info("Skipping Rosetta pre-filtering")
-        passing_pdbs = all_generated_pdbs
-    
-    # =========================================================================
-    # Phase 5: Remove Linker & Prepare for Scoring
-    # =========================================================================
-    if not args.skip_scoring and passing_pdbs:
-        logger.info("=" * 60)
-        logger.info("Phase 5: Remove Linker & Prepare for Scoring")
+        logger.info("Phase 4: Remove Linker & Prepare for Scoring")
         logger.info("=" * 60)
         
         # Build mapping from config_id to linker_length
@@ -427,14 +426,14 @@ def main():
                 return prepared_targets[0].linker_length
             return linker_length_range[0]
         
-        # Remove linker from all passing PDbs
+        # Remove linker from ALL generated PDBs
         # This creates clean target (chain A) + binder (chain B) structures
         scoring_input_dir = output_dir / "scoring_input"
         scoring_input_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"Removing linkers from {len(passing_pdbs)} structures (varying linker lengths)...")
+        logger.info(f"Removing linkers from {len(all_generated_pdbs)} structures (varying linker lengths)...")
         scoring_pdbs = []
-        for pdb_path in passing_pdbs:
+        for pdb_path in all_generated_pdbs:
             linker_len = get_linker_length_for_pdb(pdb_path)
             result = remove_linker_from_output(
                 pdb_path=pdb_path,
@@ -452,7 +451,7 @@ def main():
         pyrosetta_input_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Creating PyRosetta input files (original target + binder)...")
         pyrosetta_pdbs = []
-        for pdb_path in passing_pdbs:
+        for pdb_path in all_generated_pdbs:
             linker_len = get_linker_length_for_pdb(pdb_path)
             output_path = pyrosetta_input_dir / Path(pdb_path).name
             result = create_pyrosetta_input(
@@ -465,41 +464,329 @@ def main():
             if result:
                 pyrosetta_pdbs.append(result)
         logger.info(f"Created {len(pyrosetta_pdbs)} PyRosetta input files in {pyrosetta_input_dir}")
+    else:
+        scoring_pdbs = []
+        logger.warning("No generated PDBs found, skipping linker removal")
+    
+    # =========================================================================
+    # Phase 5: AF2 Re-prediction (no relaxation) — pre-scoring
+    # =========================================================================
+    af2_output_pdbs = []  # list of (design_name, af2_pdb_path)
+    if scoring_pdbs and not args.skip_scoring:
+        logger.info("=" * 60)
+        logger.info("Phase 5: AF2 Re-prediction (no relaxation)")
+        logger.info("=" * 60)
         
-        # =========================================================================
-        # Phase 6: AF2 Scoring
-        # =========================================================================
-        if scoring_pdbs:
-            logger.info("=" * 60)
-            logger.info("Phase 6: AF2 Scoring")
-            logger.info("=" * 60)
-            
-            scoring_output_dir = output_dir / "scored"
-            
-            score_cmd = [
-                sys.executable,
-                os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))),
-                    "laproteina_scoring", "score.py"
-                ),
-                "--input_dir", str(scoring_input_dir),
-                "--output_dir", str(scoring_output_dir),
-            ]
-            
-            logger.info(f"Running scoring: {' '.join(score_cmd)}")
+        import time as _time
+        import re as _re
+        import random as _random
+        
+        # Clear GPU memory before loading AF2
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+        
+        # Initialize ColabDesign AF2 model
+        from colabdesign import mk_afdesign_model, clear_mem
+        from colabdesign.shared.utils import copy_dict
+        from laproteina_scoring.utils import extract_sequence_from_pdb
+        
+        clear_mem()
+        logger.info("Initializing AF2 model for re-prediction...")
+        complex_model = mk_afdesign_model(
+            protocol="binder",
+            num_recycles=1,
+            use_multimer=True,
+            use_initial_guess=False,
+            use_initial_atom_pos=False
+        )
+        
+        # Pick a random AF2 model (1 of 5)
+        af2_model_num = _random.randint(0, 4)
+        logger.info(f"AF2 model initialized. Using model {af2_model_num + 1}")
+        
+        af2_predictions_dir = output_dir / "af2_predictions"
+        af2_predictions_dir.mkdir(parents=True, exist_ok=True)
+        
+        all_af2_prescores = []
+        af2_total_time = 0.0
+        
+        logger.info(f"Running AF2 re-prediction on {len(scoring_pdbs)} structures...")
+        for idx, pdb_path in enumerate(scoring_pdbs):
+            pdb_name = Path(pdb_path).stem
             
             try:
-                subprocess.run(score_cmd, check=True)
-                logger.info(f"Scoring complete. Results in: {scoring_output_dir}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Scoring failed: {e}")
-        else:
-            logger.warning("No structures available for scoring after linker removal")
+                # Extract binder sequence from chain B
+                binder_seq = extract_sequence_from_pdb(pdb_path, "B")
+                if not binder_seq:
+                    logger.warning(f"No binder sequence found in {pdb_name}, skipping")
+                    all_af2_prescores.append({"design_name": pdb_name, "status": "failed", "reason": "no_sequence"})
+                    continue
+                
+                binder_seq = _re.sub("[^A-Z]", "", binder_seq.upper())
+                binder_len = len(binder_seq)
+                
+                # Prep AF2 model inputs (target = chain A from the scoring_input PDB)
+                complex_model.prep_inputs(
+                    pdb_filename=pdb_path,
+                    chain="A",
+                    binder_len=binder_len,
+                    rm_target_seq=True,
+                    rm_target_sc=True
+                )
+                
+                # Run AF2 prediction (timed)
+                t_start = _time.time()
+                complex_model.predict(
+                    seq=binder_seq,
+                    models=[af2_model_num],
+                    num_recycles=1,
+                    verbose=False
+                )
+                t_predict = _time.time() - t_start
+                af2_total_time += t_predict
+                
+                # Save predicted PDB
+                af2_pdb_path = str(af2_predictions_dir / f"{pdb_name}_model{af2_model_num + 1}.pdb")
+                complex_model.save_pdb(af2_pdb_path)
+                
+                # Extract AF2 metrics
+                metrics = copy_dict(complex_model.aux["log"])
+                af2_stats = {
+                    "design_name": pdb_name,
+                    "status": "predicted",
+                    "sequence": binder_seq,
+                    "binder_length": binder_len,
+                    "af2_model": af2_model_num + 1,
+                    "pLDDT": round(metrics["plddt"], 3),
+                    "pTM": round(metrics["ptm"], 3),
+                    "i_pTM": round(metrics["i_ptm"], 3),
+                    "pAE": round(metrics["pae"], 3),
+                    "i_pAE": round(metrics["i_pae"], 3),
+                    "af2_predict_seconds": round(t_predict, 1),
+                }
+                all_af2_prescores.append(af2_stats)
+                af2_output_pdbs.append((pdb_name, af2_pdb_path))
+                
+                logger.info(
+                    f"[{idx+1}/{len(scoring_pdbs)}] AF2 predicted {pdb_name} in {t_predict:.1f}s — "
+                    f"pLDDT={af2_stats['pLDDT']:.2f}, pTM={af2_stats['pTM']:.2f}, "
+                    f"i_pTM={af2_stats['i_pTM']:.2f}, i_pAE={af2_stats['i_pAE']:.2f}"
+                )
+                
+            except Exception as e:
+                logger.error(f"AF2 prediction failed for {pdb_name}: {e}")
+                all_af2_prescores.append({"design_name": pdb_name, "status": "failed", "reason": str(e)})
+        
+        # Save AF2 pre-scores
+        af2_prescores_df = pd.DataFrame(all_af2_prescores)
+        af2_prescoring_csv = output_dir / "af2_prescoring_results.csv"
+        af2_prescores_df.to_csv(af2_prescoring_csv, index=False)
+        
+        af2_avg_time = af2_total_time / len(af2_output_pdbs) if af2_output_pdbs else 0
+        logger.info(f"AF2 pre-scoring complete:")
+        logger.info(f"  Total AF2 prediction time: {af2_total_time:.1f}s ({af2_total_time/60:.1f} min)")
+        logger.info(f"  Average per sample: {af2_avg_time:.1f}s")
+        logger.info(f"  Successfully predicted: {len(af2_output_pdbs)}/{len(scoring_pdbs)}")
+        logger.info(f"  Saved AF2 metrics to: {af2_prescoring_csv}")
+        
+        if not af2_prescores_df.empty and 'pLDDT' in af2_prescores_df.columns:
+            predicted = af2_prescores_df[af2_prescores_df['status'] == 'predicted']
+            if not predicted.empty:
+                logger.info(f"  AF2 metric summary:")
+                logger.info(f"    pLDDT: mean={predicted['pLDDT'].mean():.3f}, min={predicted['pLDDT'].min():.3f}, max={predicted['pLDDT'].max():.3f}")
+                logger.info(f"    pTM:   mean={predicted['pTM'].mean():.3f}, min={predicted['pTM'].min():.3f}, max={predicted['pTM'].max():.3f}")
+                logger.info(f"    i_pTM: mean={predicted['i_pTM'].mean():.3f}, min={predicted['i_pTM'].min():.3f}, max={predicted['i_pTM'].max():.3f}")
+        
+        # Free GPU memory - AF2 model no longer needed
+        del complex_model
+        clear_mem()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+        
+        # ----- AF2 Filtering: only relax samples that pass AF2 thresholds -----
+        # Uses the same thresholds as the final scoring filters (laProteina_filters.json)
+        af2_filters = {
+            "pLDDT":  {"threshold": 0.8,  "higher": True},
+            "pTM":    {"threshold": 0.55, "higher": True},
+            "i_pTM":  {"threshold": 0.5,  "higher": True},
+            "i_pAE":  {"threshold": 0.35, "higher": False},
+        }
+        
+        logger.info(f"AF2 filter thresholds (same as final scoring):")
+        for metric, cfg in af2_filters.items():
+            direction = ">=" if cfg["higher"] else "<="
+            logger.info(f"  {metric} {direction} {cfg['threshold']}")
+        
+        passing_af2 = []
+        filter_failure_counts = {}
+        
+        for design_name, af2_pdb_path in af2_output_pdbs:
+            row = next(
+                (r for r in all_af2_prescores if r.get("design_name") == design_name and r.get("status") == "predicted"),
+                None
+            )
+            if row is None:
+                continue
+            
+            passed = True
+            for metric, cfg in af2_filters.items():
+                value = row.get(metric)
+                if value is None:
+                    continue
+                if cfg["higher"] and value < cfg["threshold"]:
+                    passed = False
+                    filter_failure_counts[metric] = filter_failure_counts.get(metric, 0) + 1
+                elif not cfg["higher"] and value > cfg["threshold"]:
+                    passed = False
+                    filter_failure_counts[metric] = filter_failure_counts.get(metric, 0) + 1
+            
+            if passed:
+                passing_af2.append((design_name, af2_pdb_path))
+        
+        logger.info(f"AF2 filter results: {len(passing_af2)}/{len(af2_output_pdbs)} passed")
+        if filter_failure_counts:
+            for metric, count in sorted(filter_failure_counts.items()):
+                logger.info(f"  {metric}: {count} failures")
+        
+        af2_output_pdbs = passing_af2
+        
+    elif args.skip_scoring:
+        logger.info("Skipping AF2 scoring")
     else:
-        if args.skip_scoring:
-            logger.info("Skipping AF2 scoring")
-        else:
-            logger.info("No samples passed pre-filter, skipping scoring")
+        logger.warning("No structures available for scoring after linker removal")
+    
+    # =========================================================================
+    # Phase 6: PyRosetta Relax + Interface Scoring (only AF2-passing samples)
+    # =========================================================================
+    if af2_output_pdbs and not args.skip_scoring:
+        logger.info("=" * 60)
+        logger.info(f"Phase 6: PyRosetta Relax + Interface Scoring ({len(af2_output_pdbs)} passing samples)")
+        logger.info("=" * 60)
+        
+        import time as _time
+        
+        # Initialize PyRosetta
+        import pyrosetta as pr
+        repo_root = Path(__file__).parent.parent.parent
+        dalphaball_path = str(repo_root / 'functions' / 'DAlphaBall.gcc')
+        try:
+            pr.init(
+                f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all '
+                f'-holes:dalphaball {dalphaball_path} -corrections::beta_nov16 true '
+                f'-relax:default_repeats 1'
+            )
+        except Exception:
+            pass  # Already initialized
+        
+        from functions.pyrosetta_utils import score_interface, pr_relax
+        
+        relaxed_dir = output_dir / "relaxed"
+        relaxed_dir.mkdir(parents=True, exist_ok=True)
+        scoring_output_dir = output_dir / "scored"
+        scoring_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        all_final_scores = []
+        relax_total_time = 0.0
+        score_total_time = 0.0
+        
+        logger.info(f"Running PyRosetta relax + scoring on {len(af2_output_pdbs)} AF2-predicted structures...")
+        for idx, (design_name, af2_pdb_path) in enumerate(af2_output_pdbs):
+            try:
+                # Step 1: Relax (timed)
+                relaxed_pdb_path = str(relaxed_dir / f"{design_name}_relaxed.pdb")
+                t_start = _time.time()
+                pr_relax(af2_pdb_path, relaxed_pdb_path)
+                t_relax = _time.time() - t_start
+                relax_total_time += t_relax
+                
+                # Step 2: Score interface (timed)
+                t_start = _time.time()
+                interface_scores, interface_AA, interface_residues = score_interface(
+                    relaxed_pdb_path, binder_chain="B"
+                )
+                t_score = _time.time() - t_start
+                score_total_time += t_score
+                
+                # Combine with AF2 pre-scores
+                # Find the AF2 pre-score row for this design
+                af2_row = next(
+                    (r for r in all_af2_prescores if r.get("design_name") == design_name),
+                    {}
+                )
+                
+                final_row = {
+                    "design_name": design_name,
+                    "status": "scored",
+                    # AF2 metrics
+                    "pLDDT": af2_row.get("pLDDT"),
+                    "pTM": af2_row.get("pTM"),
+                    "i_pTM": af2_row.get("i_pTM"),
+                    "pAE": af2_row.get("pAE"),
+                    "i_pAE": af2_row.get("i_pAE"),
+                    "af2_model": af2_row.get("af2_model"),
+                    "binder_length": af2_row.get("binder_length"),
+                    # PyRosetta metrics
+                    **interface_scores,
+                    # Timing
+                    "af2_predict_seconds": af2_row.get("af2_predict_seconds"),
+                    "relax_seconds": round(t_relax, 1),
+                    "rosetta_score_seconds": round(t_score, 1),
+                    # Sequence
+                    "sequence": af2_row.get("sequence"),
+                }
+                all_final_scores.append(final_row)
+                
+                logger.info(
+                    f"[{idx+1}/{len(af2_output_pdbs)}] {design_name}: "
+                    f"relax={t_relax:.1f}s, score={t_score:.1f}s — "
+                    f"dG={interface_scores.get('interface_dG', 'N/A')}, "
+                    f"sc={interface_scores.get('interface_sc', 'N/A')}"
+                )
+                
+            except Exception as e:
+                logger.error(f"PyRosetta scoring failed for {design_name}: {e}")
+                all_final_scores.append({
+                    "design_name": design_name,
+                    "status": "rosetta_failed",
+                    "reason": str(e)
+                })
+        
+        # Save final scoring summary
+        scoring_df = pd.DataFrame(all_final_scores)
+        scoring_summary_path = scoring_output_dir / "scoring_summary.csv"
+        
+        # Reorder columns
+        priority_cols = ["design_name", "status", "pLDDT", "pTM", "i_pTM", "pAE", "i_pAE"]
+        all_cols = priority_cols + [c for c in scoring_df.columns if c not in priority_cols and c != "sequence"] + ["sequence"]
+        all_cols = [c for c in all_cols if c in scoring_df.columns]
+        scoring_df = scoring_df[all_cols]
+        
+        scoring_df.to_csv(scoring_summary_path, index=False)
+        
+        relax_avg = relax_total_time / len(af2_output_pdbs) if af2_output_pdbs else 0
+        score_avg = score_total_time / len(af2_output_pdbs) if af2_output_pdbs else 0
+        
+        logger.info(f"PyRosetta scoring complete:")
+        logger.info(f"  Total relax time:  {relax_total_time:.1f}s ({relax_total_time/60:.1f} min)")
+        logger.info(f"  Total score time:  {score_total_time:.1f}s ({score_total_time/60:.1f} min)")
+        logger.info(f"  Avg relax/sample:  {relax_avg:.1f}s")
+        logger.info(f"  Avg score/sample:  {score_avg:.1f}s")
+        logger.info(f"  Saved results to: {scoring_summary_path}")
+        
+        # Print timing comparison
+        logger.info("=" * 60)
+        logger.info("TIMING COMPARISON")
+        logger.info("=" * 60)
+        af2_avg = af2_total_time / len(af2_output_pdbs) if af2_output_pdbs else 0
+        total_pipeline_time = af2_total_time + relax_total_time + score_total_time
+        logger.info(f"  AF2 prediction:    {af2_total_time:.1f}s total, {af2_avg:.1f}s/sample")
+        logger.info(f"  PyRosetta relax:   {relax_total_time:.1f}s total, {relax_avg:.1f}s/sample")
+        logger.info(f"  PyRosetta scoring: {score_total_time:.1f}s total, {score_avg:.1f}s/sample")
+        logger.info(f"  Total pipeline:    {total_pipeline_time:.1f}s ({total_pipeline_time/60:.1f} min)")
     
     # =========================================================================
     # Summary
@@ -510,10 +797,11 @@ def main():
     
     summary = {
         "target_pdb": target_pdb,
-        "n_linker_configs": len(linker_configs),
+        "n_linker_starting_points": n_linker_starting_points,
+        "samples_per_starting_point": samples_per_config,
         "n_total_samples_requested": n_total_samples,
         "total_generated": len(all_generated_pdbs),
-        "passed_prefilter": len(passing_pdbs) if not args.skip_prefilter else "skipped",
+        "total_scored": len(scoring_pdbs),
         "output_dir": str(output_dir)
     }
     
