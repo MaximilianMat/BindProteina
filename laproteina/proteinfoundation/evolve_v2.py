@@ -10,8 +10,17 @@ Key differences from evolve.py:
 - Per round, each lineage keeps ONLY the single best variant
 - Checkpointing per lineage for fault tolerance and resume capability
 
+Supports two input modes:
+1. CSV-based: Provide input_csv + seeds_dir (classic mode, requires scoring results)
+2. PDB directory: Provide seeds_pdb_dir (no CSV needed, uses ALL PDBs as seeds)
+
 Usage:
-    python evolve_v2.py --settings settings_evolution/my_target_v2.json
+    # From scoring CSV (classic):
+    python evolve_v2.py --settings settings_evolution/my_target.json
+
+    # Directly from PDB directory (no scoring needed):
+    python evolve_v2.py --settings settings_evolution/my_target.json
+    # where settings has "seeds_pdb_dir" instead of "input_csv"
 """
 
 import argparse
@@ -205,6 +214,93 @@ def load_lineages_from_csv(
         lineages.append(lineage)
     
     logger.info(f"Created {len(lineages)} lineages from {scoring_csv}")
+    return lineages
+
+
+def load_lineages_from_pdb_dir(
+    pdb_dir: str,
+    csv_path: Optional[str] = None,
+) -> List[Lineage]:
+    """
+    Create lineages directly from a directory of PDB files.
+    
+    No scoring CSV required — every PDB in the directory becomes a seed.
+    If a CSV is provided (e.g. af2_prescoring_results.csv), metrics are read
+    for informational logging but are NOT used for filtering or ranking.
+    
+    Searches in: pdb_dir itself, pdb_dir/af2_predictions/, pdb_dir/scoring_pdbs/
+    """
+    pdb_path = Path(pdb_dir)
+    
+    # Collect PDB files from the directory and common subdirectories
+    # Prefer af2_predictions (has pLDDT in B-factors) > scoring_pdbs > root
+    search_dirs = []
+    for subdir in ["af2_predictions", "scoring_pdbs", ""]:
+        candidate = pdb_path / subdir if subdir else pdb_path
+        if candidate.is_dir():
+            search_dirs.append(candidate)
+    
+    # Collect unique PDBs (prefer af2_predictions over others)
+    seen_stems = set()
+    pdb_files = []
+    for search_dir in search_dirs:
+        for pdb_file in sorted(search_dir.glob("*.pdb")):
+            # Extract design name from filename
+            # Handles: design_name_model1.pdb, design_name.pdb
+            stem = pdb_file.stem
+            # Strip _modelN suffix if present
+            design_name = stem
+            for suffix in ["_model1", "_model2", "_model3", "_model4", "_model5"]:
+                if stem.endswith(suffix):
+                    design_name = stem[:-len(suffix)]
+                    break
+            
+            if design_name not in seen_stems:
+                seen_stems.add(design_name)
+                pdb_files.append((design_name, str(pdb_file)))
+    
+    if not pdb_files:
+        logger.warning(f"No PDB files found in {pdb_dir}")
+        return []
+    
+    # Optionally load metrics from CSV for logging
+    metrics_map = {}
+    if csv_path and Path(csv_path).exists():
+        try:
+            df = pd.read_csv(csv_path)
+            for _, row in df.iterrows():
+                name = row.get("design_name", "")
+                if name:
+                    metrics_map[name] = row.to_dict()
+        except Exception as e:
+            logger.warning(f"Could not read CSV {csv_path}: {e}")
+    
+    # Create lineages from ALL PDBs
+    lineages = []
+    for design_name, pdb_file in pdb_files:
+        # Use metric from CSV if available, otherwise 0.0
+        score = 0.0
+        csv_row = metrics_map.get(design_name, {})
+        if "i_pTM" in csv_row:
+            try:
+                score = float(csv_row["i_pTM"])
+            except (ValueError, TypeError):
+                pass
+        
+        lineage = Lineage(
+            lineage_id=f"L{len(lineages):04d}",
+            original_seed_name=design_name,
+            original_seed_pdb=pdb_file,
+            original_score=score,
+            current_best_pdb=pdb_file,
+            current_best_score=score,
+        )
+        lineages.append(lineage)
+    
+    logger.info(f"Created {len(lineages)} lineages from PDB directory: {pdb_dir}")
+    if metrics_map:
+        logger.info(f"  (loaded metrics for {len(metrics_map)} designs from CSV)")
+    
     return lineages
 
 
@@ -544,10 +640,17 @@ def main():
     )
     
     # Individual arguments (can override settings file)
-    parser.add_argument("--input_csv", type=str, default=None)
-    parser.add_argument("--seeds_dir", type=str, default=None)
+    parser.add_argument("--input_csv", type=str, default=None,
+                        help="Path to scoring CSV (optional if --seeds_pdb_dir is provided)")
+    parser.add_argument("--seeds_dir", type=str, default=None,
+                        help="Directory containing seed PDBs (used with --input_csv)")
+    parser.add_argument("--seeds_pdb_dir", type=str, default=None,
+                        help="Directory of PDBs to use as seeds directly (no CSV needed)")
     parser.add_argument("--target_pdb", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--autoencoder_path", type=str, default=None)
+    parser.add_argument("--laproteina_mode", type=str, default=None,
+                        help="'all_atom' (LD4) or 'tip_atom' (LD5)")
     parser.add_argument("--output_base_dir", type=str, default=None)
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--n_samples_per_seed", type=int, default=None)
@@ -579,14 +682,29 @@ def main():
             return settings[key]
         return default
     
-    # Required arguments
+    # Input arguments — two modes:
+    #   Mode A (CSV): input_csv + seeds_dir
+    #   Mode B (PDB dir): seeds_pdb_dir  (no CSV needed)
     input_csv = get_arg("input_csv", args.input_csv)
     seeds_dir = get_arg("seeds_dir", args.seeds_dir)
+    seeds_pdb_dir = get_arg("seeds_pdb_dir", args.seeds_pdb_dir)
     target_pdb = get_arg("target_pdb", args.target_pdb)
     checkpoint_path = get_arg("checkpoint", args.checkpoint)
+    autoencoder_path = get_arg("autoencoder_path", args.autoencoder_path)
+    laproteina_mode = get_arg("laproteina_mode", args.laproteina_mode, "all_atom")
     
-    if not all([input_csv, seeds_dir, target_pdb, checkpoint_path]):
-        parser.error("Missing required arguments. Provide --settings or individual arguments.")
+    # Validate: need either (input_csv + seeds_dir) OR seeds_pdb_dir
+    has_csv_mode = bool(input_csv and seeds_dir)
+    has_pdb_dir_mode = bool(seeds_pdb_dir)
+    
+    if not has_csv_mode and not has_pdb_dir_mode:
+        parser.error(
+            "Provide either (input_csv + seeds_dir) for CSV mode, "
+            "or seeds_pdb_dir for direct PDB directory mode."
+        )
+    
+    if not target_pdb or not checkpoint_path:
+        parser.error("target_pdb and checkpoint are required.")
     
     # Optional arguments with defaults
     output_base_dir = get_arg("output_base_dir", args.output_base_dir, "./evolution_v2_output")
@@ -599,8 +717,14 @@ def main():
     device = get_arg("device", args.device, "cuda")
     
     # Fix paths
-    input_csv = fix_path(input_csv)
-    seeds_dir = fix_path(seeds_dir)
+    if input_csv:
+        input_csv = fix_path(input_csv)
+    if seeds_dir:
+        seeds_dir = fix_path(seeds_dir)
+    if seeds_pdb_dir:
+        seeds_pdb_dir = fix_path(seeds_pdb_dir)
+    if autoencoder_path:
+        autoencoder_path = fix_path(autoencoder_path)
     target_pdb = fix_path(target_pdb)
     checkpoint_path = fix_path(checkpoint_path)
     
@@ -621,8 +745,11 @@ def main():
     settings_used = {
         "input_csv": input_csv,
         "seeds_dir": seeds_dir,
+        "seeds_pdb_dir": seeds_pdb_dir,
         "target_pdb": target_pdb,
         "checkpoint": checkpoint_path,
+        "autoencoder_path": autoencoder_path,
+        "laproteina_mode": laproteina_mode,
         "output_base_dir": output_base_dir,
         "rounds": rounds,
         "n_samples_per_seed": n_samples_per_seed,
@@ -655,6 +782,21 @@ def main():
             logger.info(f"Resumed {len(lineages)} lineages from checkpoints")
         else:
             logger.info("No checkpoints found. Creating new lineages.")
+            lineages = None  # Fall through to creation below
+    else:
+        lineages = None
+    
+    if lineages is None:
+        if has_pdb_dir_mode:
+            # Mode B: Load directly from PDB directory (all PDBs become seeds)
+            logger.info(f"Loading seeds from PDB directory: {seeds_pdb_dir}")
+            lineages = load_lineages_from_pdb_dir(
+                pdb_dir=seeds_pdb_dir,
+                csv_path=input_csv,  # Optional: for informational metrics only
+            )
+        elif has_csv_mode:
+            # Mode A: Load from scoring CSV (classic mode)
+            logger.info(f"Loading seeds from CSV: {input_csv}")
             lineages = load_lineages_from_csv(
                 scoring_csv=input_csv,
                 seeds_dir=seeds_dir,
@@ -662,14 +804,6 @@ def main():
                 target_hotspot_residues=target_hotspot_residues,
                 target_blacklist_residues=target_blacklist_residues
             )
-    else:
-        lineages = load_lineages_from_csv(
-            scoring_csv=input_csv,
-            seeds_dir=seeds_dir,
-            metric=metric,
-            target_hotspot_residues=target_hotspot_residues,
-            target_blacklist_residues=target_blacklist_residues
-        )
     
     logger.info(f"Total lineages: {len(lineages)}")
     
@@ -678,12 +812,18 @@ def main():
     
     logger.info("Loading LaProteina model...")
     ckpt_path = Path(checkpoint_path)
-    ae_path = ckpt_path.parent / "AE3_motif.ckpt"
+    
+    # Resolve autoencoder path
+    if autoencoder_path:
+        ae_path = Path(autoencoder_path)
+    else:
+        ae_path = ckpt_path.parent / "AE3_motif.ckpt"
     
     generator = LaProteinaGenerator(
         checkpoint_path=str(ckpt_path),
         autoencoder_path=str(ae_path) if ae_path.exists() else None,
-        device=device
+        device=device,
+        laproteina_mode=laproteina_mode,
     )
     generator._load_model()
     

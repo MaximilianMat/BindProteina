@@ -127,7 +127,8 @@ class EvolutionDataParser {
         // and doesn't already include it
         if (!path.startsWith('evolution_output/') && !path.includes('/evolution_output/')) {
             // If path starts with evolution_ (a run name), add evolution_output/ prefix
-            if (path.match(/^evolution_\d{8}_\d{4}\//)) {
+            // Matches both classic "evolution_YYYYMMDD_HHMM/" and v2 "evolution_v2_YYYYMMDD_HHMM/"
+            if (path.match(/^evolution_(v2_)?\d{8}_\d{4}\//)) {
                 path = 'evolution_output/' + path;
             }
         }

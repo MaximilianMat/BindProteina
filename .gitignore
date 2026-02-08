@@ -34,6 +34,9 @@ results/
 slurm-*.out
 *.log
 
+# PyTorch Lightning auto-generated logs
+lightning_logs/
+
 # IDE files
 .vscode/
 .idea/

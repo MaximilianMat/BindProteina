@@ -599,6 +599,15 @@ async function loadRun() {
         // 2. Display rounds immediately (UI becomes responsive)
         displayRounds(currentRunData.rounds);
         
+        // Show lineage info banner if applicable
+        if (currentRunData.is_lineage_based) {
+            showToast(
+                `Lineage-based evolution run (${currentRunData.num_lineages} lineages, ${currentRunData.num_rounds} rounds)`,
+                'info',
+                5000
+            );
+        }
+        
         // 2.5 Load notes for the run
         const notes = await dataParser.getRunNotes(runName);
         const notesTextarea = document.getElementById("runNotesTextarea");
@@ -642,17 +651,22 @@ async function loadRun() {
                     allDesigns.push(design);
                     
                     // Extract seed ID
+                    // For lineage-based runs, use lineage_id from metrics
                     let seedId = null;
-                    const patterns = [
-                        /^([A-Z0-9]+)_/,
-                        /^([A-Z]\d+[A-Z]\d+)/,
-                        /seed[_-]?([A-Z0-9]+)/i,
-                    ];
-                    for (const pattern of patterns) {
-                        const match = design.design_name.match(pattern);
-                        if (match) {
-                            seedId = match[1];
-                            break;
+                    if (design.metrics && design.metrics.lineage_id) {
+                        seedId = `Lineage ${design.metrics.lineage_id}`;
+                    } else {
+                        const patterns = [
+                            /^([A-Z0-9]+)_/,
+                            /^([A-Z]\d+[A-Z]\d+)/,
+                            /seed[_-]?([A-Z0-9]+)/i,
+                        ];
+                        for (const pattern of patterns) {
+                            const match = design.design_name.match(pattern);
+                            if (match) {
+                                seedId = match[1];
+                                break;
+                            }
                         }
                     }
                     if (seedId) {

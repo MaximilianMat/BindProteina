@@ -1,22 +1,24 @@
 {
     "input_dir": "/nfs/homedirs/matscher/samples/",
-    "output_dir": "/nfs/homedirs/matscher/samples/results_muc1",
+    "output_dir": "/nfs/homedirs/matscher/samples/samples_muc1",
     "starting_pdb": "/nfs/homedirs/matscher/targets/muc1/muc1_target.pdb",
     "chains": "A",
     "binder_name": "MUC1",
     "target_hotspot_residues": "1-119",
     "laproteina_settings": {
-        "checkpoint_path": "/nfs/homedirs/matscher/repos/BindCraft/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
-        "autoencoder_path": "/nfs/homedirs/matscher/repos/BindCraft/laproteina/checkpoints/AE3_motif.ckpt",
-        "n_samples": 30,
-        "batch_size": 4,
+        "checkpoint_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
+        "autoencoder_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt",
+        "laproteina_mode": "tip_atom",
+        "n_samples": 128,
+        "batch_size": 2,
+        "n_linker_starting_points": 16,
         "binder_length_range": [
             30,
             70
         ],
         "target_length": 119,
-        "linker_length": 5,
-        "linker_sequence": "GGGGS",
-        "atom_selection_mode": "tip_atoms"
-    }
+        "linker_length_range": "5-15",
+        "linker_sequence": "GGGGS"
+    },
+    "rosetta_relax": true
 }
