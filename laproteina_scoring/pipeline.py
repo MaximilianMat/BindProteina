@@ -41,9 +41,11 @@ class LaProteinaScorer:
         bindcraft_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         dalphaball_path = os.path.join(bindcraft_root, 'functions', 'DAlphaBall.gcc')
         
-        cmd = f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {dalphaball_path} -corrections::beta_nov16 true -relax:default_repeats 1'
         try:
+            from functions.pyrosetta_utils import get_pyrosetta_init_cmd
+            cmd = get_pyrosetta_init_cmd(dalphaball_path)
             pr.init(cmd)
+            print(f"PyRosetta initialized with multithreading ({os.cpu_count() or 4} threads)")
         except Exception:
             pass # Already initialized
 

@@ -674,11 +674,10 @@ def main():
         repo_root = Path(__file__).parent.parent.parent
         dalphaball_path = str(repo_root / 'functions' / 'DAlphaBall.gcc')
         try:
-            pr.init(
-                f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all '
-                f'-holes:dalphaball {dalphaball_path} -corrections::beta_nov16 true '
-                f'-relax:default_repeats 1'
-            )
+            from functions.pyrosetta_utils import get_pyrosetta_init_cmd
+            init_cmd = get_pyrosetta_init_cmd(dalphaball_path)
+            pr.init(init_cmd)
+            logger.info(f"PyRosetta initialized with multithreading ({os.cpu_count() or 4} threads)")
         except Exception:
             pass  # Already initialized
         

@@ -61,11 +61,33 @@ class EvolutionParser:
         self._run_cache = {}  # Cache for parsed evolution runs
     
     def list_evolution_runs(self) -> List[str]:
-        """List all evolution run directories."""
+        """List all evolution run directories, including those in subfolders.
+        
+        Supports both flat structure (evolution_output/evolution_*) and nested
+        structure (evolution_output/pdl1/evolution_*, evolution_output/npt2b/evolution_*, etc.)
+        
+        Returns run names with subfolder prefix if present (e.g., "pdl1/evolution_v2_20260207_1500")
+        """
         runs = []
-        for item in self.evolution_output_dir.iterdir():
-            if item.is_dir() and item.name.startswith("evolution_"):
-                runs.append(item.name)
+        
+        def search_directory(base_path: Path, prefix: str = ""):
+            """Recursively search for evolution directories."""
+            for item in base_path.iterdir():
+                if not item.is_dir():
+                    continue
+                
+                if item.name.startswith("evolution_"):
+                    # Found an evolution run directory
+                    run_name = f"{prefix}{item.name}" if prefix else item.name
+                    runs.append(run_name)
+                else:
+                    # Check if this is a subfolder that might contain evolution runs
+                    # (e.g., "pdl1", "npt2b", etc.)
+                    # Recursively search one level deep
+                    new_prefix = f"{prefix}{item.name}/" if prefix else f"{item.name}/"
+                    search_directory(item, new_prefix)
+        
+        search_directory(self.evolution_output_dir)
         return sorted(runs, reverse=True)  # Most recent first
     
     def parse_evolution_run(self, run_name: str) -> EvolutionRun:
@@ -74,17 +96,27 @@ class EvolutionParser:
         Handles two directory layouts:
         - Classic: evolution_{date}/round_*/scored/scoring_summary.csv
         - Lineage (v2): evolution_v2_{date}/lineage_*/round_*/scored/scoring_summary.csv
+        
+        Also supports nested subfolders:
+        - pdl1/evolution_v2_{date}/...
+        - npt2b/evolution_v2_{date}/...
         """
         if run_name in self._run_cache:
             return self._run_cache[run_name]
-            
-        run_path = self.evolution_output_dir / run_name
+        
+        # Handle nested paths (e.g., "pdl1/evolution_v2_20260207_1500")
+        # Split on "/" and construct the full path
+        path_parts = run_name.split("/")
+        run_path = self.evolution_output_dir
+        for part in path_parts:
+            run_path = run_path / part
         
         if not run_path.exists():
             raise ValueError(f"Evolution run not found: {run_name}")
         
-        # Extract date string
-        date_str = run_name.replace("evolution_v2_", "").replace("evolution_", "")
+        # Extract date string from the last part (the actual evolution directory name)
+        evolution_dir_name = path_parts[-1]
+        date_str = evolution_dir_name.replace("evolution_v2_", "").replace("evolution_", "")
         
         # Detect layout: check for lineage_* directories
         lineage_dirs = sorted(
@@ -240,7 +272,11 @@ class EvolutionParser:
             scored_dir = round_dir / "scored"
             
             # Build relative path prefix for this lineage's round
-            rel_prefix = Path(output_dir_name) / run.name / f"lineage_{lineage_id}" / f"round_{round_number}"
+            # Handle nested paths (e.g., "pdl1/evolution_v2_20260207_1500")
+            rel_prefix = Path(output_dir_name)
+            for part in run.name.split("/"):
+                rel_prefix = rel_prefix / part
+            rel_prefix = rel_prefix / f"lineage_{lineage_id}" / f"round_{round_number}"
             
             # Expected filename patterns
             expected_stem = f"{design.design_name}_model{design.model}"
@@ -413,7 +449,12 @@ class EvolutionParser:
     
     def get_run_notes(self, run_name: str) -> str:
         """Get notes for an evolution run."""
-        run_path = self.evolution_output_dir / run_name
+        # Handle nested paths (e.g., "pdl1/evolution_v2_20260207_1500")
+        path_parts = run_name.split("/")
+        run_path = self.evolution_output_dir
+        for part in path_parts:
+            run_path = run_path / part
+        
         notes_path = run_path / "notes.txt"
         
         if notes_path.exists():
@@ -426,7 +467,11 @@ class EvolutionParser:
 
     def save_run_notes(self, run_name: str, notes: str) -> bool:
         """Save notes for an evolution run."""
-        run_path = self.evolution_output_dir / run_name
+        # Handle nested paths (e.g., "pdl1/evolution_v2_20260207_1500")
+        path_parts = run_name.split("/")
+        run_path = self.evolution_output_dir
+        for part in path_parts:
+            run_path = run_path / part
         
         if not run_path.exists():
             return False

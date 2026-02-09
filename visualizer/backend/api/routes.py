@@ -47,7 +47,7 @@ def list_runs():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/runs/<run_name>', methods=['GET'])
+@app.route('/api/runs/<path:run_name>', methods=['GET'])
 def get_run(run_name: str):
     """Get details of a specific evolution run."""
     if parser is None:
@@ -71,7 +71,7 @@ def get_run(run_name: str):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/runs/<run_name>/rounds/<int:round_num>/designs', methods=['GET'])
+@app.route('/api/runs/<path:run_name>/rounds/<int:round_num>/designs', methods=['GET'])
 def get_round_designs(run_name: str, round_num: int):
     """Get all designs for a specific round."""
     if parser is None:
@@ -146,7 +146,7 @@ def get_round_designs(run_name: str, round_num: int):
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
-@app.route('/api/runs/<run_name>/notes', methods=['GET'])
+@app.route('/api/runs/<path:run_name>/notes', methods=['GET'])
 def get_run_notes(run_name: str):
     """Get notes for a specific evolution run."""
     if parser is None:
@@ -159,7 +159,7 @@ def get_run_notes(run_name: str):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/runs/<run_name>/notes', methods=['POST'])
+@app.route('/api/runs/<path:run_name>/notes', methods=['POST'])
 def save_run_notes(run_name: str):
     """Save notes for a specific evolution run."""
     if parser is None:

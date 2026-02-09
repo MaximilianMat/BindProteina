@@ -54,12 +54,23 @@ class EvolutionDataParser {
     async getRun(runName) {
         try {
             const response = await fetch(`${API_BASE_URL}/runs/${encodeURIComponent(runName)}`);
+            
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(`HTTP ${response.status}: ${errorData.error || response.statusText}`);
+            }
+            
             const data = await response.json();
+            
+            if (data.error) {
+                throw new Error(data.error);
+            }
+            
             this.currentRun = data;
             return data;
         } catch (error) {
             console.error("Error getting run:", error);
-            return null;
+            throw error; // Re-throw to let caller handle it
         }
     }
     

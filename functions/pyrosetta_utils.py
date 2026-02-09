@@ -16,6 +16,30 @@ from pyrosetta.rosetta.protocols.rosetta_scripts import XmlObjects
 from .generic_utils import clean_pdb
 from .biopython_utils import hotspot_residues
 
+
+def get_pyrosetta_init_cmd(dalphaball_path: str, num_threads: int = None) -> str:
+    """
+    Generate PyRosetta initialization command with multithreading support.
+    
+    Args:
+        dalphaball_path: Path to DAlphaBall executable
+        num_threads: Number of threads to use. If None, auto-detects CPU count.
+    
+    Returns:
+        Initialization command string for pr.init()
+    """
+    if num_threads is None:
+        num_threads = os.cpu_count() or 4  # Default to 4 if detection fails
+    
+    cmd = (
+        f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all '
+        f'-holes:dalphaball {dalphaball_path} -corrections::beta_nov16 true '
+        f'-relax:default_repeats 1 '
+        f'-multithreading:total_threads {num_threads} '
+        f'-multithreading:interaction_graph_threads {num_threads}'
+    )
+    return cmd
+
 # Rosetta interface scores
 def score_interface(pdb_file, binder_chain="B"):
     # load pose

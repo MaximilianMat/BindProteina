@@ -1,6 +1,6 @@
 {
     "input_dir": "/nfs/homedirs/matscher/samples/",
-    "output_dir": "/nfs/homedirs/matscher/samples/results_cld18_v2",
+    "output_dir": "/nfs/homedirs/matscher/samples/samples_cld18",
     "starting_pdb": "/nfs/homedirs/matscher/targets/cld18/cld18.pdb",
     "chains": "A",
     "binder_name": "CLD18",
@@ -8,15 +8,17 @@
     "laproteina_settings": {
         "checkpoint_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
         "autoencoder_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt",
-        "n_samples": 4,
-        "batch_size": 4,
+        "laproteina_mode": "tip_atom",
+        "n_samples": 128,
+        "batch_size": 1,
+        "n_linker_starting_points": 16,
         "binder_length_range": [
-            55,
-            100
+            30,
+            70
         ],
         "target_length": 261,
-        "linker_length": 5,
-        "linker_sequence": "GGGGS",
-        "atom_selection_mode": "tip_atoms"
-    }
+        "linker_length_range": "5-15",
+        "linker_sequence": "GGGGS"
+    },
+    "rosetta_relax": true
 }

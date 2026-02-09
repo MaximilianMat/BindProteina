@@ -111,20 +111,17 @@ class RosettaPreFilter:
     def _init_pyrosetta(self):
         """Initialize PyRosetta with appropriate settings."""
         import pyrosetta as pr
+        import os
         
         # Find DAlphaBall path
         bindcraft_root = Path(__file__).parents[1]
-        dalphaball_path = bindcraft_root / "functions" / "DAlphaBall.gcc"
-        
-        cmd = (
-            f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all '
-            f'-holes:dalphaball {dalphaball_path} '
-            f'-corrections::beta_nov16 true -relax:default_repeats 1'
-        )
+        dalphaball_path = str(bindcraft_root / "functions" / "DAlphaBall.gcc")
         
         try:
+            from functions.pyrosetta_utils import get_pyrosetta_init_cmd
+            cmd = get_pyrosetta_init_cmd(dalphaball_path)
             pr.init(cmd)
-            logger.info("PyRosetta initialized for pre-filtering")
+            logger.info(f"PyRosetta initialized for pre-filtering with multithreading ({os.cpu_count() or 4} threads)")
         except Exception:
             pass  # Already initialized
     

@@ -225,10 +225,15 @@ def load_lineages_from_pdb_dir(
     Create lineages directly from a directory of PDB files.
     
     No scoring CSV required — every PDB in the directory becomes a seed.
-    If a CSV is provided (e.g. af2_prescoring_results.csv), metrics are read
-    for informational logging but are NOT used for filtering or ranking.
     
-    Searches in: pdb_dir itself, pdb_dir/af2_predictions/, pdb_dir/scoring_pdbs/
+    Metrics are loaded for sorting (best seeds first) from:
+      1. An explicit csv_path if provided
+      2. Auto-discovered: scored/scoring_summary.csv  (full PyRosetta scoring)
+      3. Auto-discovered: af2_prescoring_results.csv  (AF2-only metrics)
+    Lineages are sorted by i_pTM descending so the most promising seeds
+    are evolved first (faster initial feedback, graceful early termination).
+    
+    Searches PDBs in: pdb_dir/af2_predictions/, pdb_dir/scoring_pdbs/, pdb_dir/
     """
     pdb_path = Path(pdb_dir)
     
@@ -263,22 +268,38 @@ def load_lineages_from_pdb_dir(
         logger.warning(f"No PDB files found in {pdb_dir}")
         return []
     
-    # Optionally load metrics from CSV for logging
+    # Load metrics from CSV for sorting.  Priority:
+    #   1. Explicit csv_path argument
+    #   2. scored/scoring_summary.csv  (full scoring, if generate_initial produced it)
+    #   3. af2_prescoring_results.csv  (AF2-only, always produced by generate_initial)
     metrics_map = {}
-    if csv_path and Path(csv_path).exists():
-        try:
-            df = pd.read_csv(csv_path)
-            for _, row in df.iterrows():
-                name = row.get("design_name", "")
-                if name:
-                    metrics_map[name] = row.to_dict()
-        except Exception as e:
-            logger.warning(f"Could not read CSV {csv_path}: {e}")
+    csv_source = None
     
-    # Create lineages from ALL PDBs
-    lineages = []
+    csv_candidates = []
+    if csv_path:
+        csv_candidates.append(Path(csv_path))
+    csv_candidates.extend([
+        pdb_path / "scored" / "scoring_summary.csv",
+        pdb_path / "af2_prescoring_results.csv",
+    ])
+    
+    for candidate_csv in csv_candidates:
+        if candidate_csv.exists():
+            try:
+                df = pd.read_csv(candidate_csv)
+                if "design_name" in df.columns and "i_pTM" in df.columns:
+                    for _, row in df.iterrows():
+                        name = row.get("design_name", "")
+                        if name:
+                            metrics_map[name] = row.to_dict()
+                    csv_source = str(candidate_csv)
+                    break
+            except Exception as e:
+                logger.warning(f"Could not read CSV {candidate_csv}: {e}")
+    
+    # Build (design_name, pdb_file, score) tuples
+    scored_pdbs = []
     for design_name, pdb_file in pdb_files:
-        # Use metric from CSV if available, otherwise 0.0
         score = 0.0
         csv_row = metrics_map.get(design_name, {})
         if "i_pTM" in csv_row:
@@ -286,9 +307,16 @@ def load_lineages_from_pdb_dir(
                 score = float(csv_row["i_pTM"])
             except (ValueError, TypeError):
                 pass
-        
+        scored_pdbs.append((design_name, pdb_file, score))
+    
+    # Sort by i_pTM descending so best seeds get processed first
+    scored_pdbs.sort(key=lambda x: x[2], reverse=True)
+    
+    # Create lineages (IDs reflect sorted order: L0000 = best seed)
+    lineages = []
+    for idx, (design_name, pdb_file, score) in enumerate(scored_pdbs):
         lineage = Lineage(
-            lineage_id=f"L{len(lineages):04d}",
+            lineage_id=f"L{idx:04d}",
             original_seed_name=design_name,
             original_seed_pdb=pdb_file,
             original_score=score,
@@ -298,8 +326,13 @@ def load_lineages_from_pdb_dir(
         lineages.append(lineage)
     
     logger.info(f"Created {len(lineages)} lineages from PDB directory: {pdb_dir}")
-    if metrics_map:
-        logger.info(f"  (loaded metrics for {len(metrics_map)} designs from CSV)")
+    if csv_source:
+        logger.info(f"  Sorted by i_pTM from: {csv_source}")
+        if lineages:
+            logger.info(f"  Best seed:  {lineages[0].original_seed_name} (i_pTM={lineages[0].original_score:.4f})")
+            logger.info(f"  Worst seed: {lineages[-1].original_seed_name} (i_pTM={lineages[-1].original_score:.4f})")
+    else:
+        logger.info(f"  No scoring CSV found — lineages are in filesystem order (unsorted)")
     
     return lineages
 
