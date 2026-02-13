@@ -860,16 +860,18 @@ def main():
     )
     generator._load_model()
     
-    # Evolution loop
-    for round_idx in range(1, rounds + 1):
+    # Evolution loop: lineages first, then rounds (all rounds of a lineage before moving to next)
+    completed_count = 0
+    for lin_idx, lineage in enumerate(lineages):
+        if lineage.status != "active":
+            continue
         logger.info("=" * 60)
-        logger.info(f"ROUND {round_idx}/{rounds}")
+        logger.info(f"LINEAGE {lineage.lineage_id} ({lin_idx + 1}/{len(lineages)})")
         logger.info("=" * 60)
-        
-        active_lineages = [l for l in lineages if l.status == "active" and l.current_round < round_idx]
-        logger.info(f"Active lineages for round {round_idx}: {len(active_lineages)}")
-        
-        for lineage in active_lineages:
+
+        for round_idx in range(1, rounds + 1):
+            if lineage.current_round >= round_idx:
+                continue  # Already completed (resume support)
             try:
                 lineage = evolve_lineage_single_round(
                     lineage=lineage,
@@ -888,14 +890,18 @@ def main():
             except Exception as e:
                 logger.error(f"Lineage {lineage.lineage_id} failed: {e}")
                 lineage.status = "failed"
-            
-            # Save checkpoint after each lineage
+                break  # Stop this lineage, move to next
             save_lineage_checkpoint(lineage, checkpoints_dir)
-        
-        # Round summary
-        completed = sum(1 for l in lineages if l.current_round >= round_idx)
-        improved = sum(1 for l in lineages if l.history and any(h.get("improved") for h in l.history if h["round"] == round_idx))
-        logger.info(f"Round {round_idx} complete: {completed} lineages processed, {improved} improved")
+
+        # Per-lineage summary
+        completed_count += 1
+        improved = any(h.get("improved") for h in (lineage.history or [])) if lineage.history else False
+        logger.info(
+            f"Lineage {lineage.lineage_id} complete: {lineage.current_round}/{rounds} rounds, "
+            f"score {lineage.current_best_score:.4f}"
+            + (f" (improved)" if improved else "")
+        )
+        logger.info(f"Progress: {completed_count} lineages fully processed")
     
     # Final summary
     logger.info("=" * 60)
