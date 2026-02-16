@@ -84,6 +84,7 @@ class PairBiasAttention(nn.Module):
         node_feats: Tensor,
         pair_feats: Optional[Tensor],
         mask: Optional[Tensor],
+        extra_bias: Optional[Tensor] = None,
     ) -> Tensor:
         """Multi-head scalar Attention Layer
 
@@ -107,19 +108,24 @@ class PairBiasAttention(nn.Module):
         q, k, v, g = map(
             lambda t: rearrange(t, "b ... (h d) -> b h ... d", h=h), (q, k, v, g)
         )
-        attn_feats = self._attn(q, k, v, b, mask)
+        attn_feats = self._attn(q, k, v, b, mask, extra_bias=extra_bias)
         attn_feats = rearrange(
             torch.sigmoid(g) * attn_feats, "b h n d -> b n (h d)", h=h
         )
         return self.to_out_node(attn_feats)
 
-    def _attn(self, q, k, v, b, mask: Optional[Tensor]) -> Tensor:
+    def _attn(
+        self, q, k, v, b, mask: Optional[Tensor], extra_bias: Optional[Tensor] = None
+    ) -> Tensor:
         """Perform attention update"""
         sim = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
         if exists(mask):
             mask = rearrange(mask, "b i j -> b () i j")
             sim = sim.masked_fill(~mask, max_neg_value(sim))
-        attn = torch.softmax(sim + b, dim=-1)
+        total_bias = b
+        if exists(extra_bias):
+            total_bias = total_bias + extra_bias
+        attn = torch.softmax(sim + total_bias, dim=-1)
         return einsum("b h i j, b h j d -> b h i d", attn, v)
 
 
@@ -142,7 +148,7 @@ class MultiHeadBiasedAttentionADALN_MM(torch.nn.Module):
         )
         self.scale_output = AdaptiveOutputScale(dim=dim_token, dim_cond=dim_cond)
 
-    def forward(self, x, pair_rep, cond, mask):
+    def forward(self, x, pair_rep, cond, mask, relpos_bias: Optional[Tensor] = None):
         """
         Args:
             x: Input sequence representation, shape [b, n, dim_token]
@@ -155,6 +161,8 @@ class MultiHeadBiasedAttentionADALN_MM(torch.nn.Module):
         """
         pair_mask = mask[:, :, None] * mask[:, None, :]  # [b, n, n]
         x = self.adaln(x, cond, mask)
-        x = self.mha(node_feats=x, pair_feats=pair_rep, mask=pair_mask)
+        x = self.mha(
+            node_feats=x, pair_feats=pair_rep, mask=pair_mask, extra_bias=relpos_bias
+        )
         x = self.scale_output(x, cond, mask)
         return x * mask[..., None]

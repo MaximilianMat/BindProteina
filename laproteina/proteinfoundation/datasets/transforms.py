@@ -658,3 +658,20 @@ class ExtractMotifCoordinatesTransform(T.BaseTransform):
         graph.seq_motif_mask = graph.motif_mask.sum(dim=-1).bool()  # [n]
         graph.seq_motif = graph.residue_type * graph.seq_motif_mask  # [n]
         return graph
+
+
+# Compatibility shim: newer torch_geometric versions define BaseTransform.forward as abstract.
+# This repository's transforms implement __call__, so we map forward -> __call__ where missing.
+for _name, _cls in list(globals().items()):
+    if (
+        isinstance(_cls, type)
+        and issubclass(_cls, T.BaseTransform)
+        and _cls is not T.BaseTransform
+    ):
+        if "forward" not in _cls.__dict__ and "__call__" in _cls.__dict__:
+            setattr(_cls, "forward", _cls.__dict__["__call__"])
+            # Clear stale abstract markers computed before monkey-patching forward.
+            if hasattr(_cls, "__abstractmethods__"):
+                _cls.__abstractmethods__ = frozenset(
+                    m for m in _cls.__abstractmethods__ if m != "forward"
+                )

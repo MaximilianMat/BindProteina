@@ -33,6 +33,8 @@ class LocalLatentsTransformer(torch.nn.Module):
         self.update_pair_repr_every_n = kwargs["update_pair_repr_every_n"]
         self.use_tri_mult = kwargs["use_tri_mult"]
         self.use_qkln = kwargs["use_qkln"]
+        self.use_relpos_bias = kwargs.get("use_relpos_bias", False)
+        self.relpos_max = kwargs.get("relpos_max", 256)
         self.output_param = kwargs["output_parameterization"]
         # To form initial representation
         self.init_repr_factory = FeatureFactory(
@@ -77,6 +79,8 @@ class LocalLatentsTransformer(torch.nn.Module):
                     parallel_mha_transition=False,
                     use_attn_pair_bias=True,
                     use_qkln=self.use_qkln,
+                    use_relpos_bias=self.use_relpos_bias,
+                    relpos_max=self.relpos_max,
                 )
                 for _ in range(self.nlayers)
             ]
@@ -150,9 +154,14 @@ class LocalLatentsTransformer(torch.nn.Module):
         pair_rep = self.pair_repr_builder(input)  # [b, n, n, pair_dim]
 
         # Run trunk
+        residue_pdb_idx = input.get("residue_pdb_idx", None)
         for i in range(self.nlayers):
             seqs = self.transformer_layers[i](
-                seqs, pair_rep, c, mask
+                seqs,
+                pair_rep,
+                c,
+                mask,
+                residue_pdb_idx=residue_pdb_idx,
             )  # [b, n, token_dim]
 
             if self.update_pair_repr:

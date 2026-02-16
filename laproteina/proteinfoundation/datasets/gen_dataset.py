@@ -9,7 +9,11 @@ from torch.utils.data import Dataset
 
 from proteinfoundation.utils.align_utils import mean_w_mask
 from proteinfoundation.utils.fold_utils import mask_cath_code_by_level
-from proteinfoundation.utils.motif_utils import parse_motif, save_motif_csv
+from proteinfoundation.utils.motif_utils import (
+    infer_leading_motif_length,
+    parse_motif,
+    save_motif_csv,
+)
 from proteinfoundation.utils.coors_utils import ang_to_nm
 
 
@@ -74,6 +78,9 @@ class GenDataset(Dataset):
         nres = self.parse_nlens_cfg(nlens_cfg)
         self.target_as_features = target_as_features
         self.motif_task_name = motif_task_name
+        self.direct_binder_mode = False
+        self.binder_chain_gap = 200
+        self.binder_target_nres = None
         if nres is not None:
             logger.info("Use length-centric sampling.")
             nsamples = [nsamples] * len(nres)
@@ -85,6 +92,9 @@ class GenDataset(Dataset):
                 raise ValueError(
                     f"Motif task name {motif_task_name} not found in motif_dict_cfg"
                 )
+            self.direct_binder_mode = bool(motif_cfg.get("direct_binder_mode", False))
+            self.binder_chain_gap = int(motif_cfg.get("binder_chain_gap", 200))
+            self.binder_target_nres = motif_cfg.get("binder_target_nres", None)
             nsamples = [nsamples]
         else:
             raise ValueError("Error in GenDataset init.")
@@ -101,6 +111,7 @@ class GenDataset(Dataset):
         ##################################################################################
         self.motif_masks = [None] * len(nsamples)
         self.x_motifs = [None] * len(nsamples)
+        self.motif_out_strs = [None] * len(nsamples)
         self.masks = [None] * len(nsamples)
         if nres is not None:
             # Length-centric generation
@@ -115,7 +126,7 @@ class GenDataset(Dataset):
         else:
             self.nsamples = nsamples
             self.cath_codes = [None] * len(nsamples)
-            self.motif_masks, self.x_motifs, self.residue_types = (
+            self.motif_masks, self.x_motifs, self.residue_types, self.motif_out_strs = (
                 self.generate_motif_info(motif_cfg, nsamples[0], motif_csv_path)
             )
 
@@ -136,6 +147,7 @@ class GenDataset(Dataset):
                     self.motif_masks,
                     self.x_motifs,
                     self.residue_types,
+                    self.motif_out_strs,
                 ) = self.flatten_motif(max_nsamples_per_batch)
 
         ##################################################################################
@@ -251,6 +263,7 @@ class GenDataset(Dataset):
         motif_masks = [motif_masks[i] for i in idx]
         x_motifs = [x_motifs[i] for i in idx]
         residue_types = [residue_types[i] for i in idx]
+        outstrs = [outstrs[i] for i in idx]
         # center motifs to origin
         for i in range(len(x_motifs)):
             motif_center = mean_w_mask(
@@ -260,7 +273,6 @@ class GenDataset(Dataset):
             x_motifs[i] = x_motifs[i] * motif_masks[i][..., None]
         # Only save CSV for contig_string (residue/range) case
         if "motif_atom_spec" not in motif_cfg or motif_cfg["motif_atom_spec"] is None:
-            outstrs = [outstrs[i] for i in idx]
             save_motif_csv(
                 motif_cfg["motif_pdb_path"],
                 self.motif_task_name,
@@ -268,7 +280,7 @@ class GenDataset(Dataset):
                 outpath=motif_csv_path,
                 segment_order=motif_cfg["segment_order"],
             )
-        return motif_masks, x_motifs, residue_types
+        return motif_masks, x_motifs, residue_types, outstrs
 
     def flatten(self, max_nsamples: int):
         """Flatten the list to make sure each data point have no more than max_nsamples"""
@@ -290,7 +302,7 @@ class GenDataset(Dataset):
         """Flatten the list to make sure each data point have no more than max_nsamples"""
         nres, cath_codes, nsamples = [], [], []
         masks, motif_masks = [], []
-        x_motifs, residue_types = [], []
+        x_motifs, residue_types, motif_out_strs = [], [], []
         for i in range(len(self.nsamples)):
             for j in range(0, self.nsamples[i], max_nsamples):
 
@@ -303,11 +315,13 @@ class GenDataset(Dataset):
                     motif_mask = self.motif_masks[j : j + max_nsamples]
                     x_motif = self.x_motifs[j : j + max_nsamples]
                     residue_type = self.residue_types[j : j + max_nsamples]
+                    out_str = self.motif_out_strs[j : j + max_nsamples]
                 else:
                     nsamples.append(self.nsamples[i] - j)
                     motif_mask = self.motif_masks[j : self.nsamples[i]]
                     x_motif = self.x_motifs[j : self.nsamples[i]]
                     residue_type = self.residue_types[j : self.nsamples[i]]
+                    out_str = self.motif_out_strs[j : self.nsamples[i]]
                 mask = [torch.Tensor([True] * x.shape[0]) for x in motif_mask]
                 padded_mask = torch.nn.utils.rnn.pad_sequence(
                     mask, batch_first=True, padding_value=False
@@ -325,8 +339,55 @@ class GenDataset(Dataset):
                 motif_masks.append(padded_motif_mask)
                 x_motifs.append(padded_x_motif)
                 residue_types.append(padded_residue_type)
+                motif_out_strs.append(out_str)
                 nres.append(padded_mask.shape[1])
-        return nres, cath_codes, nsamples, masks, motif_masks, x_motifs, residue_types
+        return (
+            nres,
+            cath_codes,
+            nsamples,
+            masks,
+            motif_masks,
+            x_motifs,
+            residue_types,
+            motif_out_strs,
+        )
+
+    def _build_direct_binder_chain_tensors(self, nres: int, batch_idx: int):
+        """
+        Build residue indexes with a chain gap and chain metadata for direct binder generation.
+        """
+        target_len = self.binder_target_nres
+        if target_len is None:
+            out_str_batch = self.motif_out_strs[batch_idx]
+            if isinstance(out_str_batch, list) and len(out_str_batch) > 0:
+                target_len = infer_leading_motif_length(out_str_batch[0])
+        if target_len is None:
+            target_len = int(self.motif_masks[batch_idx][0].sum(-1).bool().sum().item())
+        target_len = max(1, min(int(target_len), int(nres)))
+
+        bs = self.nsamples[batch_idx]
+        device = self.masks[batch_idx].device
+        base = torch.arange(1, nres + 1, device=device, dtype=torch.long)
+        residue_pdb_idx = base.unsqueeze(0).repeat(bs, 1)
+        if target_len < nres:
+            binder_len = nres - target_len
+            binder_idx = torch.arange(
+                target_len + self.binder_chain_gap + 1,
+                target_len + self.binder_chain_gap + binder_len + 1,
+                device=device,
+                dtype=torch.long,
+            )
+            residue_pdb_idx[:, target_len:] = binder_idx
+
+        chain_breaks_per_residue = torch.zeros((bs, nres), device=device, dtype=torch.bool)
+        if target_len < nres:
+            chain_breaks_per_residue[:, target_len - 1] = True
+
+        chains = torch.zeros((bs, nres), device=device, dtype=torch.long)
+        if target_len < nres:
+            chains[:, target_len:] = 1
+
+        return residue_pdb_idx, chain_breaks_per_residue, chains
 
     def pad_nlens(self, n_replicas: int):
         """Split nlens into data points (len, nsample) as val dataset and guarantee that
@@ -421,6 +482,17 @@ class GenDataset(Dataset):
             )  # [bs, num_res]
             result["seq_motif"] = self.residue_types[index]  # [bs, num_res]
             result["mask"] = self.masks[index].bool()  # [bs, num_res]
+            if self.direct_binder_mode:
+                residue_pdb_idx, chain_breaks_per_residue, chains = (
+                    self._build_direct_binder_chain_tensors(
+                        nres=self.nres[index], batch_idx=index
+                    )
+                )
+                result["residue_pdb_idx"] = residue_pdb_idx
+                result["chain_breaks_per_residue"] = chain_breaks_per_residue
+                result["chains"] = chains
+                result["clamp_motif_during_sampling"] = True
+                result["loss_on_non_motif_only"] = True
             return result
 
         # Fallback: unconditional

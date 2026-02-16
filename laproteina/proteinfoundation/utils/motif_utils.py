@@ -1,7 +1,7 @@
 import itertools
 import random
 import re
-from typing import List, Literal, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import biotite.structure.io as strucio
 import numpy as np
@@ -180,6 +180,31 @@ def generate_motif_indices(
         motif_indices.append(motif_index)
         out_strs.append(output_string[:-1])
     return (overall_lengths, motif_indices, out_strs)
+
+
+def infer_leading_motif_length(contig: str) -> Optional[int]:
+    """
+    Infer the length of the leading motif segment(s) in a contig.
+
+    This is used for direct binder generation where the target is provided as the
+    leading motif and the binder is generated as the following scaffold segment.
+    """
+    if contig is None:
+        return None
+    alphabet = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
+    target_len = 0
+    for part in contig.split("/"):
+        if len(part) == 0:
+            continue
+        if part[0] in alphabet:
+            if "-" in part:
+                start, end = map(int, part[1:].split("-"))
+            else:
+                start = end = int(part[1:])
+            target_len += end - start + 1
+        else:
+            break
+    return target_len if target_len > 0 else None
 
 
 def parse_motif_atom_spec(spec: str):

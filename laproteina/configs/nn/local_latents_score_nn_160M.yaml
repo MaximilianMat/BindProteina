@@ -45,3 +45,5 @@ update_pair_repr_every_n: 3  # Update the pair representation every n layers
 use_tri_mult: False  # whether to use triangular multiplication layers in pair update, ignored if not updating pair representation
 
 use_qkln: True
+use_relpos_bias: False
+relpos_max: 256

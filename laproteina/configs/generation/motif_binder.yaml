@@ -1,0 +1,49 @@
+defaults:
+  - motif_dict
+  - _self_
+
+args:
+  fold_cond: False
+
+dataset:
+  nlens_cfg:
+    nres_lens: null
+    min_len:
+    max_len:
+    step_len:
+  cath_codes: null
+  nsamples: 8
+  max_nsamples_per_batch: 2
+  empirical_distribution_cfg:
+    len_cath_code_path: null
+    cath_code_level: null
+    bucket_min_len: 50
+    bucket_max_len: 274
+    bucket_step_size: 25
+  direct_binder_mode: True
+  binder_chain_gap: 200
+  binder_target_nres: null
+
+metric:
+  compute_designability: False
+  designability_modes: ["ca", "bb3o"]
+  designability_folding_models: ["esmfold"]
+  designability_motif_eval: True
+
+  compute_codesignability: False
+  codesignability_modes: ["ca", "bb3o", "all_atom"]
+  codesignability_folding_models: ["esmfold"]
+  codesignability_motif_eval: True
+  compute_co_sequence_recovery: False
+
+  compute_motif_rmsd: True
+  motif_rmsd_modes: ["ca", "bb3o", "all_atom"]
+
+  keep_folding_outputs: False
+
+  compute_novelty_pdb: False
+  compute_novelty_afdb: False
+  compute_novelty_afdb_rep_v4: False
+  compute_novelty_afdb_rep_v4_geniefilters_maxlen512: False
+  compute_fid: False
+  metric_factory: null

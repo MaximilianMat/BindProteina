@@ -237,18 +237,33 @@ class ProductSpaceFlowMatcher(L.LightningModule):
         Returns:
             Losses for each data modality, per element in the batch.
         """
+        loss_mask = batch.get("loss_mask", batch["mask"])
         loss = {
             data_mode: self.base_flow_matchers[data_mode].compute_fm_loss(
                 x_0=batch["x_0"][data_mode],
                 x_1=batch["x_1"][data_mode],
                 x_t=batch["x_t"][data_mode],
-                mask=batch["mask"],
+                mask=loss_mask,
                 t=batch["t"][data_mode],
                 nn_out=nn_out[data_mode],
             )
             for data_mode in self.data_modes
         }
         return loss
+
+    def _get_motif_anchor_ca(self, batch: Dict):
+        """
+        Builds per-residue target anchors from motif atom coordinates.
+        """
+        motif_mask = batch.get("motif_mask", None)
+        x_motif = batch.get("x_motif", None)
+        if motif_mask is None or x_motif is None:
+            return None, None
+        motif_res_mask = motif_mask.sum(-1).bool()
+        atom_mask = motif_mask.float()
+        atom_mask_sum = atom_mask.sum(-1, keepdim=True).clamp_min(1.0)
+        anchor_ca = (x_motif * atom_mask[..., None]).sum(-2) / atom_mask_sum
+        return motif_res_mask, anchor_ca
 
     def compute_aux_loss(
         self,
@@ -655,6 +670,12 @@ class ProductSpaceFlowMatcher(L.LightningModule):
                     mask=mask,
                     simulation_step_params=simulation_step_params,
                 )
+                if bool(batch.get("clamp_motif_during_sampling", False)):
+                    motif_res_mask, motif_anchor_ca = self._get_motif_anchor_ca(batch)
+                    if motif_res_mask is not None and "bb_ca" in x:
+                        x["bb_ca"] = torch.where(
+                            motif_res_mask[..., None], motif_anchor_ca, x["bb_ca"]
+                        )
 
             additional_info = {
                 "mask": mask,

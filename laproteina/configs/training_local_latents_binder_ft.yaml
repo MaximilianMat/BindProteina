@@ -1,0 +1,83 @@
+run_name_: binder_ft_relpos_lora
+
+hardware:
+  ncpus_per_task_train_: 8
+  ncpus_per_task_prepro_: 32
+  accelerator: gpu
+  ngpus_per_node_: 1
+  nnodes_: 1
+
+defaults:
+  - dataset: pdb/pdb_train_motif_aa_multimer
+  - nn: local_latents_score_nn_160M_motif_idx_aa_binder
+  - generation: validation_local_latents
+  - _self_
+
+pretrain_ckpt_path: /nfs/students/matscher/laproteina_checkpoints/LD4_motif_idx_aa.ckpt
+
+product_flowmatcher:
+  bb_ca:
+    zero_com_noise: True
+    guidance_enabled: True
+    dim: 3
+  local_latents:
+    zero_com_noise: False
+    guidance_enabled: True
+    dim: null
+
+autoencoder_ckpt_path: /nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt
+
+loss:
+  t_distribution:
+    bb_ca:
+      name: mix_unif_beta
+      p1: 1.9
+      p2: 1.0
+      p3: 0.02
+    local_latents:
+      name: mix_unif_beta
+      p1: 1.0
+      p2: 1.5
+      p3: 0.2
+    shared_groups:
+
+force_precision_f32: False
+
+training:
+  n_recycle: 0
+  motif_conditioning: True
+  self_cond: True
+  p_folding_n_inv_folding_iters: 0.05
+
+lora:
+  r: 16
+  lora_alpha: 32.0
+  lora_dropout: 0.05
+  train_bias: none
+
+opt:
+  lr: 0.00005
+  max_epochs: 10000000
+  accumulate_grad_batches: 4
+  skip_nan_grad: False
+  grad_and_weight_analysis: False
+  dist_strategy: auto
+  val_check_interval: 1000
+
+log:
+  wandb_project: laproteina
+  log_wandb: True
+  log_every_n_steps: 10
+  checkpoint: True
+  checkpoint_dir: /nfs/students/matscher/laproteina_checkpoints
+  checkpoint_every_n_steps: 5000
+  last_ckpt_every_n_steps: 2000
+  save_top_k: 3
+
+seed: 42
+
+ema:
+  decay: 0.999
+  validate_original_weights: False
+  every_n_steps: 1
+  cpu_offload: False

@@ -1,7 +1,7 @@
 dataset:
   motif_dict_cfg:
     TARGET_BINDER_AA:
-      contig_string: A1-409/10-150 #note: maybe 10 zu lang? siehe letzten test
+      contig_string: A1-409/10-150
       motif_pdb_path: motif_benchmark_pdb_files/linked.pdb
       motif_only: True
       motif_min_length: 490

@@ -1,0 +1,52 @@
+datamodule:
+  _target_: "proteinfoundation.datasets.pdb_data.PDBLightningDataModule"
+  data_dir: ${oc.env:DATA_PATH}/pdb_train/
+  in_memory: False
+  format: "cif"
+  overwrite: False
+  batch_padding: True
+  sampling_mode: "cluster-random"
+  transforms:
+    - _target_: "proteinfoundation.datasets.transforms.CoordsToNanometers"
+    - _target_: "proteinfoundation.datasets.transforms.CenterStructureTransform"
+    - _target_: "proteinfoundation.datasets.transforms.GlobalRotationTransform"
+    - _target_: "proteinfoundation.datasets.transforms.ChainBreakPerResidueTransform"
+    - _target_: "proteinfoundation.datasets.transforms.MotifMaskTransform"
+      atom_selection_mode: "all"
+      motif_max_pct_res: 0.5
+      motif_prob: 1.0
+    - _target_: "proteinfoundation.datasets.transforms.CenteringTransform"
+      center_mode: "motif"
+      data_mode: "all-atom"
+    - _target_: "proteinfoundation.datasets.transforms.ExtractMotifCoordinatesTransform"
+  batch_size: 2  # H200/A100: use 2; reduce to 1 if OOM on smaller GPUs
+  num_workers: 16
+  pin_memory: True
+
+  dataselector:
+    _target_: "proteinfoundation.datasets.pdb_data.PDBDataSelector"
+    data_dir: ${oc.env:DATA_PATH}/pdb_train/
+    fraction: 0.001
+    molecule_type: "protein"
+    experiment_types: ["diffraction", "EM"]
+    min_length: 50
+    max_length: 384
+    oligomeric_min: 2
+    oligomeric_max: 2
+    best_resolution: 0.0
+    worst_resolution: 5.0
+    has_ligands: []
+    remove_ligands: []
+    remove_non_standard_residues: True
+    remove_pdb_unavailable: True
+    exclude_ids: ["9b57", "9b5p", "9b5s", "9b5n", "9b5a", "9b5k", "9b5v", "9b59", "9b5w", "9b5g", "9b5i", "9b5x", "9b5d", "9b5e", "9b5t", "9b5f",
+                  "9b5o", "9b58", "9b5u", "9b5c", "9b5j", "9b5b", "9b5h", "9b5q", "9b5l", "9b56", "9b5m", "9b5l", "9b55", "9b5r", "9ij9", "9iix",
+                  "2ezq", "1kld", "1crr", "2ezs", "2ezr", "1vve", "7ll9_G"]
+
+  datasplitter:
+    _target_: "proteinfoundation.datasets.pdb_data.PDBDataSplitter"
+    data_dir: ${oc.env:DATA_PATH}/pdb_train/
+    train_val_test: [0.98, 0.019, 0.001]
+    split_type: "sequence_similarity"
+    split_sequence_similarity: 0.5
+    overwrite_sequence_clusters: False

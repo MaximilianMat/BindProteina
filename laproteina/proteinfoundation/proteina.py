@@ -228,6 +228,10 @@ class Proteina(L.LightningModule):
         # Number of recycling steps
         n_recycle = self.handle_recycling()
 
+        if bool(batch.get("loss_on_non_motif_only", False)) and "motif_mask" in batch:
+            motif_res_mask = batch["motif_mask"].sum(-1).bool()
+            batch["loss_mask"] = batch["mask"] & (~motif_res_mask)
+
         nn_out = self.call_nn(batch, n_recycle=n_recycle)
         losses = self.fm.compute_loss(
             batch=batch,

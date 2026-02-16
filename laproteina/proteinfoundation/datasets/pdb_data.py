@@ -112,6 +112,27 @@ class PDBDataSelector:
             return self.df_data
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Graphein can fail on malformed ligand map lines in some installations.
+        # If that happens, default to an empty ligand map instead of crashing.
+        if (
+            hasattr(PDBManager, "_parse_ligand_map")
+            and not getattr(PDBManager, "_laproteina_safe_ligand_map", False)
+        ):
+            _orig_parse_ligand_map = PDBManager._parse_ligand_map
+
+            def _safe_parse_ligand_map(self):
+                try:
+                    return _orig_parse_ligand_map(self)
+                except IndexError as exc:
+                    logger.warning(
+                        f"Graphein ligand map parsing failed ({exc}); "
+                        "falling back to an empty ligand map."
+                    )
+                    return {}
+
+            PDBManager._parse_ligand_map = _safe_parse_ligand_map
+            PDBManager._laproteina_safe_ligand_map = True
+
         logger.info(f"Initializing PDBManager in {self.data_dir}...")
         pdb_manager = PDBManager(root_dir=self.data_dir, labels=self.labels)
 
@@ -747,7 +768,27 @@ class PDBLightningDataModule(BaseLightningDataModule):
         """
         df_split = self.dfs_splits[split]
         self.clusterid_to_seqid_mappings = self.clusterid_to_seqid_mappings
-        pdb_codes = df_split["pdb"].tolist()
+        if "pdb" in df_split.columns:
+            pdb_codes = df_split["pdb"].tolist()
+        elif "id" in df_split.columns:
+            # Some Graphein/MMseqs flows keep only `id` in split dataframes.
+            # Recover pdb identifiers from the full dataframe when possible.
+            if isinstance(self.df_data, pd.DataFrame) and "id" in self.df_data.columns:
+                id_to_pdb = {}
+                if "pdb" in self.df_data.columns:
+                    id_to_pdb = (
+                        self.df_data[["id", "pdb"]]
+                        .drop_duplicates(subset=["id"])
+                        .set_index("id")["pdb"]
+                        .to_dict()
+                    )
+                elif "id" in self.df_data.columns:
+                    id_to_pdb = {k: k for k in self.df_data["id"].tolist()}
+                pdb_codes = [id_to_pdb.get(seq_id, str(seq_id)) for seq_id in df_split["id"].tolist()]
+            else:
+                pdb_codes = [str(seq_id) for seq_id in df_split["id"].tolist()]
+        else:
+            raise KeyError("Expected one of ['pdb', 'id'] in split dataframe columns.")
         # Check if 'chain' column exists in the DataFrame
         if 'chain' in df_split.columns:
             chains = df_split["chain"].tolist()

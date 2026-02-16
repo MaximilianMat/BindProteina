@@ -33,6 +33,9 @@ class LocalLatentsTransformerMotifUidx(torch.nn.Module):
         self.update_pair_repr_every_n = kwargs["update_pair_repr_every_n"]
         self.use_tri_mult = kwargs["use_tri_mult"]
         self.use_qkln = kwargs["use_qkln"]
+        self.use_relpos_bias = kwargs.get("use_relpos_bias", False)
+        self.relpos_max = kwargs.get("relpos_max", 256)
+        self.relpos_motif_gap = kwargs.get("relpos_motif_gap", 200)
         self.output_param = kwargs["output_parameterization"]
 
         # To form initial representation
@@ -84,6 +87,8 @@ class LocalLatentsTransformerMotifUidx(torch.nn.Module):
                     parallel_mha_transition=False,
                     use_attn_pair_bias=True,
                     use_qkln=self.use_qkln,
+                    use_relpos_bias=self.use_relpos_bias,
+                    relpos_max=self.relpos_max,
                 )
                 for _ in range(self.nlayers)
             ]
@@ -173,6 +178,24 @@ class LocalLatentsTransformerMotifUidx(torch.nn.Module):
         # Extend mask
         mask = torch.cat([mask, motif_mask], dim=1)  # [b, n + nres_motif]
 
+        # Build/extend residue indexes for relative positional bias.
+        residue_pdb_idx = input.get("residue_pdb_idx", None)
+        if residue_pdb_idx is None:
+            residue_pdb_idx = (
+                torch.arange(1, n_orig + 1, device=seqs.device, dtype=torch.long)
+                .unsqueeze(0)
+                .repeat(b, 1)
+            )
+        else:
+            residue_pdb_idx = residue_pdb_idx.long()
+        motif_start = residue_pdb_idx.max(dim=1, keepdim=True).values + self.relpos_motif_gap
+        motif_idx = (
+            torch.arange(1, n_motif + 1, device=seqs.device, dtype=torch.long)
+            .unsqueeze(0)
+            .repeat(b, 1)
+        )
+        residue_pdb_idx = torch.cat([residue_pdb_idx, motif_start + motif_idx], dim=1)
+
         # Extend pair representation with zeros; pair has shape [b, n, n, pair_dim] -> [b, n+nres_motif, n+nres_motif, pair_dim]
         # [b, n, n, pair_dim] -> [b, n + nres_motif, n, pair_dim]
         zero_pad_d1 = torch.zeros(
@@ -188,7 +211,11 @@ class LocalLatentsTransformerMotifUidx(torch.nn.Module):
         # Run trunk
         for i in range(self.nlayers):
             seqs = self.transformer_layers[i](
-                seqs, pair_rep, c, mask
+                seqs,
+                pair_rep,
+                c,
+                mask,
+                residue_pdb_idx=residue_pdb_idx,
             )  # [b, n, token_dim]
 
             if self.update_pair_repr:
