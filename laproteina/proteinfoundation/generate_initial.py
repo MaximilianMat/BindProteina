@@ -21,10 +21,11 @@ import sys
 import json
 import subprocess
 import torch
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Set
+from typing import Any, List, Dict, Optional, Tuple, Set
 from loguru import logger
 
 # Adjust path to import BindProteina modules
@@ -136,6 +137,40 @@ def compute_interface_overlap(pre_residues_str: str, post_residues_str: str) -> 
     return len(intersection) / len(union) if union else 0.0
 
 
+def _resolve_filter_settings_path(settings: Dict[str, Any], repo_root: Path) -> Path:
+    """Resolve filter JSON path from settings with sane defaults."""
+    lp_settings = settings.get("laproteina_settings", {})
+    filter_path = (
+        settings.get("filters")
+        or settings.get("filter_settings_path")
+        or lp_settings.get("filters")
+        or lp_settings.get("filter_settings_path")
+        or "settings_filters/laProteina_filters.json"
+    )
+    filter_path = Path(fix_path(str(filter_path)))
+    if not filter_path.is_absolute():
+        filter_path = repo_root / filter_path
+    return filter_path
+
+
+def _pick_filter_spec(
+    filters_cfg: Dict[str, Dict[str, Any]],
+    metric_suffix: str,
+    model_num: int
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Pick filter in priority order: model-specific -> model 1 -> average."""
+    candidate_keys = [
+        f"{model_num}_{metric_suffix}",
+        f"1_{metric_suffix}",
+        f"Average_{metric_suffix}",
+    ]
+    for key in candidate_keys:
+        spec = filters_cfg.get(key)
+        if isinstance(spec, dict) and spec.get("threshold") is not None:
+            return key, spec
+    return None, None
+
+
 def main():
     # Set matmul precision for performance on Tensor Cores
     if torch.cuda.is_available():
@@ -173,6 +208,18 @@ def main():
     
     # Extract settings (settings_target format)
     lp_settings = settings.get("laproteina_settings", {})
+    repo_root = Path(__file__).parent.parent.parent
+    filter_settings_path = _resolve_filter_settings_path(settings, repo_root)
+    if filter_settings_path.exists():
+        with open(filter_settings_path, "r") as f:
+            filter_settings = json.load(f)
+        logger.info(f"Using filter settings: {filter_settings_path}")
+    else:
+        filter_settings = {}
+        logger.warning(
+            f"Filter settings not found at {filter_settings_path}. "
+            "Proceeding without JSON-based filtering."
+        )
     
     # Required fields
     target_pdb = fix_path(settings["starting_pdb"])
@@ -553,6 +600,12 @@ def main():
                 
                 # Extract AF2 metrics
                 metrics = copy_dict(complex_model.aux["log"])
+                binder_plddt = None
+                residue_plddt = complex_model.aux.get("plddt")
+                if residue_plddt is not None:
+                    residue_plddt = np.asarray(residue_plddt).reshape(-1)
+                    if residue_plddt.size >= binder_len:
+                        binder_plddt = round(float(np.mean(residue_plddt[-binder_len:])), 3)
                 af2_stats = {
                     "design_name": pdb_name,
                     "status": "predicted",
@@ -560,6 +613,7 @@ def main():
                     "binder_length": binder_len,
                     "af2_model": af2_model_num + 1,
                     "pLDDT": round(metrics["plddt"], 3),
+                    "binder_pLDDT": binder_plddt,
                     "pTM": round(metrics["ptm"], 3),
                     "i_pTM": round(metrics["i_ptm"], 3),
                     "pAE": round(metrics["pae"], 3),
@@ -573,6 +627,10 @@ def main():
                     f"[{idx+1}/{len(scoring_pdbs)}] AF2 predicted {pdb_name} in {t_predict:.1f}s — "
                     f"pLDDT={af2_stats['pLDDT']:.2f}, pTM={af2_stats['pTM']:.2f}, "
                     f"i_pTM={af2_stats['i_pTM']:.2f}, i_pAE={af2_stats['i_pAE']:.2f}"
+                    + (
+                        f", binder_pLDDT={af2_stats['binder_pLDDT']:.2f}"
+                        if af2_stats["binder_pLDDT"] is not None else ""
+                    )
                 )
                 
             except Exception as e:
@@ -607,19 +665,35 @@ def main():
             import gc
             gc.collect()
         
-        # ----- AF2 Filtering: only relax samples that pass AF2 thresholds -----
-        # Uses the same thresholds as the final scoring filters (laProteina_filters.json)
-        af2_filters = {
-            "pLDDT":  {"threshold": 0.8,  "higher": True},
-            "pTM":    {"threshold": 0.55, "higher": True},
-            "i_pTM":  {"threshold": 0.5,  "higher": True},
-            "i_pAE":  {"threshold": 0.35, "higher": False},
+        # ----- AF2 Filtering: keep only samples passing JSON-driven AF2 filters -----
+        af2_metric_to_suffix = {
+            "pLDDT": "pLDDT",
+            "binder_pLDDT": "Binder_pLDDT",
+            "pTM": "pTM",
+            "i_pTM": "i_pTM",
+            "pAE": "pAE",
+            "i_pAE": "i_pAE",
         }
+        af2_filters = {}
+        for metric_name, metric_suffix in af2_metric_to_suffix.items():
+            filter_key, filter_spec = _pick_filter_spec(
+                filter_settings,
+                metric_suffix,
+                af2_model_num + 1,
+            )
+            if filter_key and filter_spec:
+                af2_filters[metric_name] = {
+                    "threshold": filter_spec.get("threshold"),
+                    "higher": filter_spec.get("higher", True),
+                    "filter_key": filter_key,
+                }
         
-        logger.info(f"AF2 filter thresholds (same as final scoring):")
+        logger.info("AF2 filter thresholds (loaded from filter JSON):")
+        if not af2_filters:
+            logger.info("  No AF2 filters with thresholds were found; keeping all AF2 predictions.")
         for metric, cfg in af2_filters.items():
             direction = ">=" if cfg["higher"] else "<="
-            logger.info(f"  {metric} {direction} {cfg['threshold']}")
+            logger.info(f"  {cfg['filter_key']} ({metric}) {direction} {cfg['threshold']}")
         
         passing_af2 = []
         filter_failure_counts = {}
@@ -639,10 +713,12 @@ def main():
                     continue
                 if cfg["higher"] and value < cfg["threshold"]:
                     passed = False
-                    filter_failure_counts[metric] = filter_failure_counts.get(metric, 0) + 1
+                    key = cfg["filter_key"]
+                    filter_failure_counts[key] = filter_failure_counts.get(key, 0) + 1
                 elif not cfg["higher"] and value > cfg["threshold"]:
                     passed = False
-                    filter_failure_counts[metric] = filter_failure_counts.get(metric, 0) + 1
+                    key = cfg["filter_key"]
+                    filter_failure_counts[key] = filter_failure_counts.get(key, 0) + 1
             
             if passed:
                 passing_af2.append((design_name, af2_pdb_path))
@@ -722,6 +798,7 @@ def main():
                     "status": "scored",
                     # AF2 metrics
                     "pLDDT": af2_row.get("pLDDT"),
+                    "binder_pLDDT": af2_row.get("binder_pLDDT"),
                     "pTM": af2_row.get("pTM"),
                     "i_pTM": af2_row.get("i_pTM"),
                     "pAE": af2_row.get("pAE"),
@@ -737,6 +814,52 @@ def main():
                     # Sequence
                     "sequence": af2_row.get("sequence"),
                 }
+
+                # Apply all available JSON-backed filters for metrics present in final_row.
+                # Any filter key not mappable to computed metrics is skipped.
+                final_metric_to_suffix = {
+                    "pLDDT": "pLDDT",
+                    "binder_pLDDT": "Binder_pLDDT",
+                    "pTM": "pTM",
+                    "i_pTM": "i_pTM",
+                    "pAE": "pAE",
+                    "i_pAE": "i_pAE",
+                    "binder_score": "Binder_Energy_Score",
+                    "surface_hydrophobicity": "Surface_Hydrophobicity",
+                    "interface_sc": "ShapeComplementarity",
+                    "interface_packstat": "PackStat",
+                    "interface_dG": "dG",
+                    "interface_dSASA": "dSASA",
+                    "interface_nres": "n_InterfaceResidues",
+                    "interface_interface_hbonds": "n_InterfaceHbonds",
+                    "interface_delta_unsat_hbonds": "n_InterfaceUnsatHbonds",
+                    "interface_hydrophobicity": "Interface_Hydrophobicity",
+                }
+                failed_filters = []
+                model_num = int(final_row.get("af2_model") or (af2_model_num + 1))
+                for metric_name, metric_suffix in final_metric_to_suffix.items():
+                    metric_value = final_row.get(metric_name)
+                    if metric_value is None:
+                        continue
+                    filter_key, filter_spec = _pick_filter_spec(
+                        filter_settings,
+                        metric_suffix,
+                        model_num,
+                    )
+                    if not filter_key or not filter_spec:
+                        continue
+                    threshold = filter_spec.get("threshold")
+                    if threshold is None:
+                        continue
+                    higher = filter_spec.get("higher", True)
+                    passed = metric_value >= threshold if higher else metric_value <= threshold
+                    if not passed:
+                        failed_filters.append(filter_key)
+
+                final_row["overall_passed_filters"] = len(failed_filters) == 0
+                final_row["failed_filters"] = ";".join(failed_filters)
+                if failed_filters:
+                    final_row["status"] = "failed_filter"
                 all_final_scores.append(final_row)
                 
                 logger.info(

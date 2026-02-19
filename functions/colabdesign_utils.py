@@ -254,6 +254,12 @@ def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, 
             prediction_model.predict(seq=binder_sequence, models=[model_num], num_recycles=advanced_settings["num_recycles_validation"], verbose=False)
             prediction_model.save_pdb(complex_pdb)
             prediction_metrics = copy_dict(prediction_model.aux["log"]) # contains plddt, ptm, i_ptm, pae, i_pae
+            binder_plddt = None
+            residue_plddt = prediction_model.aux.get("plddt")
+            if residue_plddt is not None:
+                residue_plddt = np.asarray(residue_plddt).reshape(-1)
+                if residue_plddt.size >= length:
+                    binder_plddt = round(float(np.mean(residue_plddt[-length:])), 2)
 
             # extract the statistics for the model
             stats = {
@@ -261,7 +267,8 @@ def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, 
                 'pTM': round(prediction_metrics['ptm'], 2), 
                 'i_pTM': round(prediction_metrics['i_ptm'], 2), 
                 'pAE': round(prediction_metrics['pae'], 2), 
-                'i_pAE': round(prediction_metrics['i_pae'], 2)
+                'i_pAE': round(prediction_metrics['i_pae'], 2),
+                'Binder_pLDDT': binder_plddt,
             }
             prediction_stats[model_num+1] = stats
 
@@ -274,14 +281,18 @@ def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, 
                 (f"{model_num+1}_i_pAE", 'i_pae', '<='),
             ]
 
+            if binder_plddt is not None:
+                filter_conditions.append((f"{model_num+1}_Binder_pLDDT", 'binder_plddt', '>='))
+
             # perform initial AF2 values filtering to determine whether to skip relaxation and interface scoring
             for filter_name, metric_key, comparison in filter_conditions:
                 threshold = filters.get(filter_name, {}).get("threshold")
                 if threshold is not None:
-                    if comparison == '>=' and prediction_metrics[metric_key] < threshold:
+                    metric_value = binder_plddt if metric_key == 'binder_plddt' else prediction_metrics[metric_key]
+                    if comparison == '>=' and metric_value < threshold:
                         pass_af2_filters = False
                         filter_failures[filter_name] = filter_failures.get(filter_name, 0) + 1
-                    elif comparison == '<=' and prediction_metrics[metric_key] > threshold:
+                    elif comparison == '<=' and metric_value > threshold:
                         pass_af2_filters = False
                         filter_failures[filter_name] = filter_failures.get(filter_name, 0) + 1
 

@@ -3,8 +3,8 @@ defaults:
   - generation: motif_binder
   - _self_
 
-run_name_: laproteina_motif_idx_aa_binder
-ckpt_path: /nfs/students/matscher/laproteina_checkpoints
+run_name_: laproteina_ft_reference
+ckpt_path: /nfs/students/matscher/laproteina_checkpoints/
 ckpt_name: LD4_motif_idx_aa.ckpt
 autoencoder_ckpt_path: /nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt
 

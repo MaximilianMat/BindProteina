@@ -60,6 +60,7 @@ def create_full_prot(
     atom37: np.ndarray,
     atom37_mask: np.ndarray,
     chain_index=None,
+    residue_index=None,
     aatype=None,
     b_factors=None,
 ):
@@ -67,9 +68,16 @@ def create_full_prot(
     assert atom37.shape[-1] == 3
     assert atom37.shape[-2] == 37
     n = atom37.shape[0]
-    residue_index = np.arange(n)
+    if residue_index is None:
+        residue_index = np.arange(n)
+    else:
+        residue_index = np.asarray(residue_index).astype(int)
+        assert residue_index.shape[0] == n
     if chain_index is None:
-        chain_index = np.zeros(n)
+        chain_index = np.zeros(n, dtype=int)
+    else:
+        chain_index = np.asarray(chain_index).astype(int)
+        assert chain_index.shape[0] == n
     if b_factors is None:
         b_factors = np.zeros([n, 37])
     if aatype is None:
@@ -89,6 +97,8 @@ def write_prot_to_pdb(
     file_path: str,
     aatype: np.ndarray = None,
     chain_index: np.ndarray = None,
+    residue_index: np.ndarray = None,
+    atom_mask: np.ndarray = None,
     overwrite=False,
     no_indexing=False,
     b_factors=None,
@@ -116,10 +126,23 @@ def write_prot_to_pdb(
         if prot_pos.ndim == 4:
             for t, pos37 in enumerate(prot_pos):
                 atom37_mask = np.sum(np.abs(pos37), axis=-1) > 1e-7
+                if atom_mask is not None:
+                    atom37_mask = (
+                        atom_mask[t]
+                        if np.asarray(atom_mask).ndim == 3
+                        else np.asarray(atom_mask)
+                    )
+                cur_chain_index = chain_index
+                cur_residue_index = residue_index
+                if cur_chain_index is not None and np.asarray(cur_chain_index).ndim == 2:
+                    cur_chain_index = cur_chain_index[t]
+                if cur_residue_index is not None and np.asarray(cur_residue_index).ndim == 2:
+                    cur_residue_index = cur_residue_index[t]
                 prot = create_full_prot(
                     pos37,
                     atom37_mask,
-                    chain_index=chain_index,
+                    chain_index=cur_chain_index,
+                    residue_index=cur_residue_index,
                     aatype=aatype,
                     b_factors=b_factors,
                 )
@@ -127,10 +150,13 @@ def write_prot_to_pdb(
                 f.write(pdb_prot)
         elif prot_pos.ndim == 3:
             atom37_mask = np.sum(np.abs(prot_pos), axis=-1) > 1e-7
+            if atom_mask is not None:
+                atom37_mask = np.asarray(atom_mask)
             prot = create_full_prot(
                 prot_pos,
                 atom37_mask,
                 chain_index=chain_index,
+                residue_index=residue_index,
                 aatype=aatype,
                 b_factors=b_factors,
             )
@@ -193,7 +219,8 @@ def to_pdb(prot: Protein, model=1, add_end=True) -> str:
                 )
             )
             last_chain_index = chain_index[i]
-            chain_residue_index_offset = residue_index[i]
+            # Make first residue in each chain start at 1.
+            chain_residue_index_offset = residue_index[i] - 1
             atom_index += 1  # Atom index increases at the TER symbol.
 
         res_name_3 = res_1to3(aatype[i])

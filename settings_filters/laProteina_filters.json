@@ -8,15 +8,15 @@
         "higher": false
     },
     "Average_pLDDT": {
-        "threshold": 0.85,
+        "threshold": 0.0,
         "higher": true
     },
     "1_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.0,
         "higher": true
     },
     "2_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.0,
         "higher": true
     },
     "3_pLDDT": {
@@ -1244,27 +1244,27 @@
         "higher": false
     },
     "Average_Binder_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.7,
         "higher": true
     },
     "1_Binder_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.7,
         "higher": true
     },
     "2_Binder_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.7,
         "higher": true
     },
     "3_Binder_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.7,
         "higher": true
     },
     "4_Binder_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.7,
         "higher": true
     },
     "5_Binder_pLDDT": {
-        "threshold": 0.8,
+        "threshold": 0.7,
         "higher": true
     },
     "Average_Binder_pTM": {

@@ -1,19 +1,21 @@
 dataset:
   motif_dict_cfg:
     TARGET_BINDER_AA:
-      contig_string: A1-409/10-150
-      motif_pdb_path: motif_benchmark_pdb_files/linked.pdb
+      contig_string: A1-690/40-80
+      motif_pdb_path: /nfs/homedirs/matscher/targets/npt2b_LP/npt2b.pdb
       motif_only: True
-      motif_min_length: 490
-      motif_max_length: 550
+      motif_min_length: 730
+      motif_max_length: 770
+      binder_target_nres: 690
       segment_order: "A"
       atom_selection_mode: "all_atom"
     TARGET_BINDER_TIP:
-      contig_string: A1-291/20-100
-      motif_pdb_path: motif_benchmark_pdb_files/cld18_target_30.pdb
+      contig_string: A1-690/40-80
+      motif_pdb_path: /nfs/homedirs/matscher/targets/npt2b_LP/npt2b.pdb
       motif_only: True
-      motif_min_length: 311
-      motif_max_length: 391
+      motif_min_length: 730
+      motif_max_length: 770
+      binder_target_nres: 690
       segment_order: "A"
       atom_selection_mode: "tip_atoms"
     1PRW_AA:

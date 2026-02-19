@@ -553,12 +553,44 @@ class Proteina(L.LightningModule):
         # Dict with keys `coors` (a37), `residue_type`, and `mask`,
         # shapes [b, n, 37, 3], [b, n], [b, n]
 
+        # Keep motif identities and motif atom coordinates fixed at output time.
+        # x_motif is stored in nm in datasets/transforms; convert to angstrom to match decoded coors.
+        if "motif_mask" in batch and "seq_motif" in batch:
+            motif_mask = batch["motif_mask"].bool()  # [b, n, 37]
+            motif_res_mask = motif_mask.sum(-1).bool()  # [b, n]
+            sample_prots["residue_type"] = torch.where(
+                motif_res_mask,
+                batch["seq_motif"].long(),
+                sample_prots["residue_type"].long(),
+            )
+            if "x_motif" in batch:
+                motif_coors_ang = nm_to_ang(batch["x_motif"])
+                sample_prots["coors"] = torch.where(
+                    motif_mask[..., None],
+                    motif_coors_ang,
+                    sample_prots["coors"],
+                )
+                if "atom_mask" in sample_prots:
+                    sample_prots["atom_mask"] = torch.where(
+                        motif_mask,
+                        torch.ones_like(sample_prots["atom_mask"]),
+                        sample_prots["atom_mask"],
+                    )
+
         generation_list = []
+        chains_batch = batch.get("chains")  # [bs, nres] when direct_binder_mode
+        residue_pdb_idx_batch = batch.get("residue_pdb_idx")
+        atom_mask_batch = sample_prots.get("atom_mask")
         for i in range(sample_prots["coors"].shape[0]):
-            generation_list.append(
-                (sample_prots["coors"][i], sample_prots["residue_type"][i])
-            )  # Tuple (coors [n, 37, 3], aatype [n])
-        return generation_list  # List of tupes (coors [n, 37, 3], aatype [n])
+            item = (sample_prots["coors"][i], sample_prots["residue_type"][i])
+            if chains_batch is not None:
+                item = (*item, chains_batch[i])
+            if residue_pdb_idx_batch is not None:
+                item = (*item, residue_pdb_idx_batch[i])
+            if atom_mask_batch is not None:
+                item = (*item, atom_mask_batch[i])
+            generation_list.append(item)
+        return generation_list
 
     def sample_formatting(
         self,
@@ -697,13 +729,14 @@ class Proteina(L.LightningModule):
                 "coors": nm_to_ang(output_decoder["coors_nm"]),  # [b, n, 37, 3]
                 "residue_type": output_decoder["residue_type"],  # [b, n]
                 "mask": output_decoder["residue_mask"],  # [b, n]
+                "atom_mask": output_decoder["atom_mask"],  # [b, n, 37]
             }
 
         elif ret_mode == "pdb_string":
             pdb_strings = []
 
             coors_atom_37 = (
-                nm_to_ang(output_decoder["coors_nm"]).float().detach().cpu().numpy(),
+                nm_to_ang(output_decoder["coors_nm"]).float().detach().cpu().numpy()
             )  # [b, n, 37, 3]
             residue_type = output_decoder["residue_type"]  # [b, n]
             atom_mask = output_decoder["atom_mask"]  # [b, n, 37]

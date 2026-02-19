@@ -37,6 +37,9 @@ slurm-*.out
 # PyTorch Lightning auto-generated logs
 lightning_logs/
 
+# Checkpoint temp dir (avoids cross-device link on NFS)
+laproteina/.tmp/
+
 # IDE files
 .vscode/
 .idea/

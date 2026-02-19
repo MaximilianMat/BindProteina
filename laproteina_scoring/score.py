@@ -250,6 +250,7 @@ def main():
     # Define metric mappings (our column name -> filter key template)
     metric_filters = {
         "pLDDT": "{model}_pLDDT",
+        "Binder_pLDDT": "{model}_Binder_pLDDT",
         "pTM": "{model}_pTM",
         "i_pTM": "{model}_i_pTM",
         "pAE": "{model}_pAE",

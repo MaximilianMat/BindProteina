@@ -29,13 +29,13 @@ case "${PHASE}" in
     python proteinfoundation/train.py \
       --config-name training_local_latents_binder_ft \
       +single=true \
-      run_name_=binder_ft_relpos_lora_h200 \
+      run_name_=binder_ft_relpos_lora_2 \
       dataset.datamodule.dataselector.fraction=0.1
 
     python proteinfoundation/train.py \
       --config-name training_local_latents_binder_ft \
       +single=true \
-      run_name_=binder_ft_relpos_lora_h200 \
+      run_name_=binder_ft_relpos_lora_2 \
       dataset=pdb/pdb_train_motif_aa \
       dataset.datamodule.dataselector.fraction=0.1
     ;;

@@ -48,6 +48,9 @@ class GenDataset(Dataset):
         nsamples: Optional[int] = 1,
         max_nsamples_per_batch: Optional[int] = 1,
         n_replicas: int = 1,
+        direct_binder_mode: bool = False,
+        binder_chain_gap: int = 200,
+        binder_target_nres: Optional[int] = None,
     ):
         """
         Args:
@@ -92,9 +95,15 @@ class GenDataset(Dataset):
                 raise ValueError(
                     f"Motif task name {motif_task_name} not found in motif_dict_cfg"
                 )
-            self.direct_binder_mode = bool(motif_cfg.get("direct_binder_mode", False))
-            self.binder_chain_gap = int(motif_cfg.get("binder_chain_gap", 200))
-            self.binder_target_nres = motif_cfg.get("binder_target_nres", None)
+            self.direct_binder_mode = bool(
+                motif_cfg.get("direct_binder_mode", direct_binder_mode)
+            )
+            self.binder_chain_gap = int(
+                motif_cfg.get("binder_chain_gap", binder_chain_gap)
+            )
+            self.binder_target_nres = motif_cfg.get(
+                "binder_target_nres", binder_target_nres
+            )
             nsamples = [nsamples]
         else:
             raise ValueError("Error in GenDataset init.")
@@ -255,6 +264,11 @@ class GenDataset(Dataset):
         return out_nres, out_cath_codes, out_nsamples
 
     def generate_motif_info(self, motif_cfg, nsamples, motif_csv_path):
+        # Keep binder-specific control keys out of parse_motif kwargs.
+        motif_cfg = dict(motif_cfg)
+        motif_cfg.pop("direct_binder_mode", None)
+        motif_cfg.pop("binder_chain_gap", None)
+        motif_cfg.pop("binder_target_nres", None)
         # Always return motif_masks, x_motifs, residue_types as lists of tensors, regardless of input type
         lengths, motif_masks, x_motifs, residue_types, outstrs = parse_motif(
             nsamples=nsamples, **motif_cfg

@@ -280,12 +280,25 @@ def save_predictions(
 
     samples_per_length = defaultdict(int)
     for j, pred in enumerate(predictions):
-        coors_atom37, residue_type = pred  # [n, 37, 3] and [n]
+        coors_atom37, residue_type = pred[0], pred[1]  # [n, 37, 3] and [n]
         n = coors_atom37.shape[-3]
+        atom_mask = None
+        if len(pred) >= 3 and pred[-1].ndim == 2:
+            atom_mask = pred[-1].detach().cpu().numpy()
         if chain_indexes:
             chain_index = chain_indexes[j].numpy()
+        elif len(pred) >= 3 and pred[2].ndim == 1:
+            chain_index = pred[2].detach().cpu().numpy()
         else:
             chain_index = None
+        residue_index = (
+            pred[3].detach().cpu().numpy()
+            if len(pred) >= 4 and pred[3].ndim == 1
+            else None
+        )
+        if atom_mask is not None and len(pred) >= 5:
+            # In motif/direct-binder mode tuple is (coors, aatype, chains, residue_idx, atom_mask)
+            residue_index = pred[3].detach().cpu().numpy()
 
         # Create directory where everything related to this sample will be stored
         suffix = ""
@@ -304,6 +317,8 @@ def save_predictions(
             aatype=residue_type.detach().cpu().numpy(),
             file_path=pdb_path,
             chain_index=chain_index,
+            residue_index=residue_index,
+            atom_mask=atom_mask,
             overwrite=True,
             no_indexing=True,
         )
@@ -320,7 +335,16 @@ def save_motif_predictions(
     print([(p[0].shape, p[1].shape) for p in predictions])
     samples_per_length = defaultdict(int)
     for j, pred in enumerate(predictions):
-        coors_atom37, residue_type = pred  # [n, 37, 3] and [n]
+        coors_atom37, residue_type = pred[0], pred[1]
+        atom_mask = pred[-1] if len(pred) >= 3 and pred[-1].ndim == 2 else None
+        chain_index = pred[2] if len(pred) >= 3 and pred[2].ndim == 1 else None
+        residue_index = pred[3] if len(pred) >= 4 and pred[3].ndim == 1 else None
+        if chain_index is not None:
+            chain_index = chain_index.cpu().numpy()
+        if residue_index is not None:
+            residue_index = residue_index.cpu().numpy()
+        if atom_mask is not None:
+            atom_mask = atom_mask.cpu().numpy()
         n = coors_atom37.shape[-3]
         dir_name = f"job_{job_id}_id_{j}_motif_{motif_pdb_name}"
         samples_per_length[n] += 1
@@ -332,6 +356,9 @@ def save_motif_predictions(
             prot_pos=coors_atom37.float().detach().cpu().numpy(),
             aatype=residue_type.detach().cpu().numpy(),
             file_path=pdb_path,
+            chain_index=chain_index,
+            residue_index=residue_index,
+            atom_mask=atom_mask,
             overwrite=True,
             no_indexing=True,
         )

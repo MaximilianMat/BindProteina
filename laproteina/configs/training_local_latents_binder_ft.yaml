@@ -1,4 +1,4 @@
-run_name_: binder_ft_relpos_lora
+run_name_: binder_ft_relpos_lora_2
 
 hardware:
   ncpus_per_task_train_: 8
@@ -50,10 +50,10 @@ training:
   p_folding_n_inv_folding_iters: 0.05
 
 lora:
-  r: 16
+  r: 20
   lora_alpha: 32.0
   lora_dropout: 0.05
-  train_bias: none
+  train_bias: 'lora_only'
 
 opt:
   lr: 0.00005
