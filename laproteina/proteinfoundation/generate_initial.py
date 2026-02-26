@@ -260,6 +260,12 @@ def main():
     remainder_samples = n_total_samples % n_linker_starting_points
     
     device = settings.get("device", "cuda")
+    direct_binder_mode = settings.get(
+        "direct_binder_mode",
+        lp_settings.get("direct_binder_mode", False),
+    )
+    if isinstance(direct_binder_mode, str):
+        direct_binder_mode = direct_binder_mode.strip().lower() in {"1", "true", "yes", "on"}
     
     # LaProteina mode: "all_atom" (LD4) or "tip_atom" (LD5)
     # Controls which model config, feature factory class, and atom selection are used
@@ -279,6 +285,7 @@ def main():
                (f" (+1 for first {remainder_samples})" if remainder_samples else ""))
     logger.info(f"  binder_length_range: {binder_length_range}")
     logger.info(f"  batch_size: {batch_size}")
+    logger.info(f"  direct_binder_mode: {direct_binder_mode}")
     
     # Create output directory
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
@@ -299,7 +306,7 @@ def main():
         logger.error(f"Target PDB not found: {target_pdb}")
         sys.exit(1)
     
-    if not hotspot_string:
+    if not direct_binder_mode and not hotspot_string:
         logger.error("target_hotspot_residues is required for linker generation")
         sys.exit(1)
     
@@ -307,59 +314,66 @@ def main():
     target_length = get_target_length(target_pdb, chain_id="A")
     logger.info(f"Target protein: {Path(target_pdb).name}, length: {target_length}")
     
-    # =========================================================================
-    # Phase 1: Generate Linker Configurations
-    # =========================================================================
-    logger.info("=" * 60)
-    logger.info("Phase 1: Generating Linker Configurations")
-    logger.info("=" * 60)
-    
-    linker_generator = LinkerConfigGenerator(
-        hotspot_string=hotspot_string,
-        linker_length_range=linker_length_range,
-        mode=linker_mode,
-        n_attachment_points=n_linker_starting_points  # Evenly space attachment points across hotspot
-    )
-    
-    linker_configs = linker_generator.generate_configs(n_linker_starting_points)
-    logger.info(f"Generated {len(linker_configs)} linker configurations")
-    logger.info(linker_generator.get_edge_summary())
-    
-    # Save linker configs
-    linker_configs_data = [
-        {
-            "config_id": cfg.config_id,
-            "attachment_residue": cfg.attachment_residue,
-            "linker_length": cfg.linker_length,
-            "edge_type": cfg.edge_type,
-            "hotspot_range": cfg.hotspot_range
-        }
-        for cfg in linker_configs
-    ]
-    with open(output_dir / "linker_configs.json", 'w') as f:
-        json.dump(linker_configs_data, f, indent=2)
-    
-    # =========================================================================
-    # Phase 2: Prepare Targets with Linkers
-    # =========================================================================
-    logger.info("=" * 60)
-    logger.info("Phase 2: Preparing Targets with Linkers")
-    logger.info("=" * 60)
-    
-    prepared_targets_dir = output_dir / "prepared_targets"
-    target_preparer = TargetPreparer(
-        output_dir=str(prepared_targets_dir),
-        linker_mode="polyglycine"  # Fast mode for initial generation
-    )
-    
-    prepared_targets = target_preparer.prepare_batch(
-        target_pdb=target_pdb,
-        linker_configs=linker_configs,
-        binder_length_range=binder_length_range,
-        chain_id="A"
-    )
-    
-    logger.info(f"Prepared {len(prepared_targets)} target+linker combinations")
+    prepared_targets = []
+    if not direct_binder_mode:
+        # =========================================================================
+        # Phase 1: Generate Linker Configurations
+        # =========================================================================
+        logger.info("=" * 60)
+        logger.info("Phase 1: Generating Linker Configurations")
+        logger.info("=" * 60)
+        
+        linker_generator = LinkerConfigGenerator(
+            hotspot_string=hotspot_string,
+            linker_length_range=linker_length_range,
+            mode=linker_mode,
+            n_attachment_points=n_linker_starting_points  # Evenly space attachment points across hotspot
+        )
+        
+        linker_configs = linker_generator.generate_configs(n_linker_starting_points)
+        logger.info(f"Generated {len(linker_configs)} linker configurations")
+        logger.info(linker_generator.get_edge_summary())
+        
+        # Save linker configs
+        linker_configs_data = [
+            {
+                "config_id": cfg.config_id,
+                "attachment_residue": cfg.attachment_residue,
+                "linker_length": cfg.linker_length,
+                "edge_type": cfg.edge_type,
+                "hotspot_range": cfg.hotspot_range
+            }
+            for cfg in linker_configs
+        ]
+        with open(output_dir / "linker_configs.json", 'w') as f:
+            json.dump(linker_configs_data, f, indent=2)
+        
+        # =========================================================================
+        # Phase 2: Prepare Targets with Linkers
+        # =========================================================================
+        logger.info("=" * 60)
+        logger.info("Phase 2: Preparing Targets with Linkers")
+        logger.info("=" * 60)
+        
+        prepared_targets_dir = output_dir / "prepared_targets"
+        target_preparer = TargetPreparer(
+            output_dir=str(prepared_targets_dir),
+            linker_mode="polyglycine"  # Fast mode for initial generation
+        )
+        
+        prepared_targets = target_preparer.prepare_batch(
+            target_pdb=target_pdb,
+            linker_configs=linker_configs,
+            binder_length_range=binder_length_range,
+            chain_id="A"
+        )
+        
+        logger.info(f"Prepared {len(prepared_targets)} target+linker combinations")
+    else:
+        logger.info("=" * 60)
+        logger.info("Phase 1/2: Direct Binder Mode (no linker generation)")
+        logger.info("=" * 60)
+        logger.info("Skipping linker configuration and target preparation.")
     
     # =========================================================================
     # Phase 3: Generate Binder Samples
@@ -397,38 +411,52 @@ def main():
     generated_dir = output_dir / "generated"
     generated_dir.mkdir(exist_ok=True)
     
-    # Distribute total samples evenly across linker starting points
-    n_configs = len(prepared_targets)
-    samples_per_config = n_total_samples // n_configs
-    remainder = n_total_samples % n_configs
-    
-    logger.info(f"Distributing {n_total_samples} samples across {n_configs} linker starting points")
-    logger.info(f"  Samples per starting point: {samples_per_config}" +
-               (f" (+1 for first {remainder})" if remainder else ""))
-    
     all_generated_pdbs = []
-    for idx, prepared_target in enumerate(prepared_targets):
-        # First 'remainder' starting points get one extra sample
-        n_samples_this_config = samples_per_config + (1 if idx < remainder else 0)
-        
-        if n_samples_this_config == 0:
-            logger.info(f"Starting point {idx}: Skipping (no samples allocated)")
-            continue
-            
-        pdbs = generate_samples_for_config(
-            generator=generator,
-            prepared_target=prepared_target,
-            n_samples=n_samples_this_config,
-            output_dir=generated_dir,
-            config_idx=idx,
-            max_batch_size=batch_size
+    if direct_binder_mode:
+        logger.info(f"Generating {n_total_samples} direct binder samples (single pass)")
+        direct_samples = generator.generate_binder(
+            target_pdb=target_pdb,
+            target_residue_range=(1, target_length),
+            binder_length_range=binder_length_range,
+            n_samples=n_total_samples,
+            output_dir=str(generated_dir),
+            design_id="direct",
+            max_batch_size=batch_size,
         )
-        all_generated_pdbs.extend(pdbs)
-        logger.info(f"Starting point {idx}: Generated {len(pdbs)} samples (total: {len(all_generated_pdbs)})")
+        all_generated_pdbs.extend(direct_samples)
+        logger.info(f"Direct mode: Generated {len(direct_samples)} samples")
+    else:
+        # Distribute total samples evenly across linker starting points
+        n_configs = len(prepared_targets)
+        samples_per_config = n_total_samples // n_configs
+        remainder = n_total_samples % n_configs
         
-        # Clear GPU cache between configs to prevent memory fragmentation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        logger.info(f"Distributing {n_total_samples} samples across {n_configs} linker starting points")
+        logger.info(f"  Samples per starting point: {samples_per_config}" +
+                   (f" (+1 for first {remainder})" if remainder else ""))
+        
+        for idx, prepared_target in enumerate(prepared_targets):
+            # First 'remainder' starting points get one extra sample
+            n_samples_this_config = samples_per_config + (1 if idx < remainder else 0)
+            
+            if n_samples_this_config == 0:
+                logger.info(f"Starting point {idx}: Skipping (no samples allocated)")
+                continue
+                
+            pdbs = generate_samples_for_config(
+                generator=generator,
+                prepared_target=prepared_target,
+                n_samples=n_samples_this_config,
+                output_dir=generated_dir,
+                config_idx=idx,
+                max_batch_size=batch_size
+            )
+            all_generated_pdbs.extend(pdbs)
+            logger.info(f"Starting point {idx}: Generated {len(pdbs)} samples (total: {len(all_generated_pdbs)})")
+            
+            # Clear GPU cache between configs to prevent memory fragmentation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # Unload generator to free GPU memory
     generator.unload()
@@ -447,70 +475,81 @@ def main():
         logger.info("Phase 4: Remove Linker & Prepare for Scoring")
         logger.info("=" * 60)
         
-        # Build mapping from config_id to linker_length
-        # Each sample may have a different linker length based on its config
-        config_to_linker_len = {}
-        for pt in prepared_targets:
-            config_to_linker_len[pt.linker_config.config_id] = pt.linker_length
-        
-        def get_linker_length_for_pdb(pdb_path: str) -> int:
-            """Extract linker length from PDB path based on config_id or L{num} pattern."""
-            import re
-            path_str = str(pdb_path)
+        if direct_binder_mode:
+            # Direct mode outputs are already target+binder complexes. Just copy into scoring_input.
+            scoring_input_dir = output_dir / "scoring_input"
+            scoring_input_dir.mkdir(parents=True, exist_ok=True)
+            scoring_pdbs = []
+            for pdb_path in all_generated_pdbs:
+                out_path = scoring_input_dir / Path(pdb_path).name
+                shutil.copy2(pdb_path, out_path)
+                scoring_pdbs.append(str(out_path))
+            logger.info(f"Prepared {len(scoring_pdbs)} direct-binder structures for scoring")
+        else:
+            # Build mapping from config_id to linker_length
+            # Each sample may have a different linker length based on its config
+            config_to_linker_len = {}
+            for pt in prepared_targets:
+                config_to_linker_len[pt.linker_config.config_id] = pt.linker_length
             
-            # Try to match config_id (e.g., cfg006)
-            for config_id, linker_len in config_to_linker_len.items():
-                if config_id in path_str:
-                    return linker_len
+            def get_linker_length_for_pdb(pdb_path: str) -> int:
+                """Extract linker length from PDB path based on config_id or L{num} pattern."""
+                import re
+                path_str = str(pdb_path)
+                
+                # Try to match config_id (e.g., cfg006)
+                for config_id, linker_len in config_to_linker_len.items():
+                    if config_id in path_str:
+                        return linker_len
+                
+                # Fallback: try to parse L{num} from filename
+                match = re.search(r'_L(\d+)_', path_str)
+                if match:
+                    return int(match.group(1))
+                
+                # Last resort: use first config's linker length
+                if prepared_targets:
+                    return prepared_targets[0].linker_length
+                return linker_length_range[0]
             
-            # Fallback: try to parse L{num} from filename
-            match = re.search(r'_L(\d+)_', path_str)
-            if match:
-                return int(match.group(1))
+            # Remove linker from ALL generated PDBs
+            # This creates clean target (chain A) + binder (chain B) structures
+            scoring_input_dir = output_dir / "scoring_input"
+            scoring_input_dir.mkdir(parents=True, exist_ok=True)
             
-            # Last resort: use first config's linker length
-            if prepared_targets:
-                return prepared_targets[0].linker_length
-            return linker_length_range[0]
-        
-        # Remove linker from ALL generated PDBs
-        # This creates clean target (chain A) + binder (chain B) structures
-        scoring_input_dir = output_dir / "scoring_input"
-        scoring_input_dir.mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"Removing linkers from {len(all_generated_pdbs)} structures (varying linker lengths)...")
-        scoring_pdbs = []
-        for pdb_path in all_generated_pdbs:
-            linker_len = get_linker_length_for_pdb(pdb_path)
-            result = remove_linker_from_output(
-                pdb_path=pdb_path,
-                target_length=target_length,
-                linker_length=linker_len,
-                output_path=str(scoring_input_dir / Path(pdb_path).name)
-            )
-            if result:
-                scoring_pdbs.append(result)
-        
-        logger.info(f"Prepared {len(scoring_pdbs)} structures for scoring")
-        
-        # Create PyRosetta input files (original target + extracted binder)
-        pyrosetta_input_dir = output_dir / "pyrosetta_input"
-        pyrosetta_input_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Creating PyRosetta input files (original target + binder)...")
-        pyrosetta_pdbs = []
-        for pdb_path in all_generated_pdbs:
-            linker_len = get_linker_length_for_pdb(pdb_path)
-            output_path = pyrosetta_input_dir / Path(pdb_path).name
-            result = create_pyrosetta_input(
-                pdb_path=pdb_path,
-                original_target_pdb=target_pdb,
-                target_length=target_length,
-                linker_length=linker_len,
-                output_path=str(output_path)
-            )
-            if result:
-                pyrosetta_pdbs.append(result)
-        logger.info(f"Created {len(pyrosetta_pdbs)} PyRosetta input files in {pyrosetta_input_dir}")
+            logger.info(f"Removing linkers from {len(all_generated_pdbs)} structures (varying linker lengths)...")
+            scoring_pdbs = []
+            for pdb_path in all_generated_pdbs:
+                linker_len = get_linker_length_for_pdb(pdb_path)
+                result = remove_linker_from_output(
+                    pdb_path=pdb_path,
+                    target_length=target_length,
+                    linker_length=linker_len,
+                    output_path=str(scoring_input_dir / Path(pdb_path).name)
+                )
+                if result:
+                    scoring_pdbs.append(result)
+            
+            logger.info(f"Prepared {len(scoring_pdbs)} structures for scoring")
+            
+            # Create PyRosetta input files (original target + extracted binder)
+            pyrosetta_input_dir = output_dir / "pyrosetta_input"
+            pyrosetta_input_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Creating PyRosetta input files (original target + binder)...")
+            pyrosetta_pdbs = []
+            for pdb_path in all_generated_pdbs:
+                linker_len = get_linker_length_for_pdb(pdb_path)
+                output_path = pyrosetta_input_dir / Path(pdb_path).name
+                result = create_pyrosetta_input(
+                    pdb_path=pdb_path,
+                    original_target_pdb=target_pdb,
+                    target_length=target_length,
+                    linker_length=linker_len,
+                    output_path=str(output_path)
+                )
+                if result:
+                    pyrosetta_pdbs.append(result)
+            logger.info(f"Created {len(pyrosetta_pdbs)} PyRosetta input files in {pyrosetta_input_dir}")
     else:
         scoring_pdbs = []
         logger.warning("No generated PDBs found, skipping linker removal")
@@ -920,7 +959,8 @@ def main():
     summary = {
         "target_pdb": target_pdb,
         "n_linker_starting_points": n_linker_starting_points,
-        "samples_per_starting_point": samples_per_config,
+        "direct_binder_mode": direct_binder_mode,
+        "samples_per_starting_point": samples_per_starting_point,
         "n_total_samples_requested": n_total_samples,
         "total_generated": len(all_generated_pdbs),
         "total_scored": len(scoring_pdbs),

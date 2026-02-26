@@ -533,7 +533,19 @@ class LaProteinaGenerator:
         motif_pdb_name = Path(motif_cfg.motif_pdb_path).stem
         
         for idx, pred in enumerate(predictions_flat):
-            coors_atom37, residue_type = pred
+            # Backward compatible with both tuple layouts:
+            # (coors, aatype) and (coors, aatype, chains, residue_idx, atom_mask).
+            coors_atom37, residue_type = pred[0], pred[1]
+            chain_index = pred[2] if len(pred) >= 3 and pred[2].ndim == 1 else None
+            residue_index = pred[3] if len(pred) >= 4 and pred[3].ndim == 1 else None
+            atom_mask = pred[-1] if len(pred) >= 3 and pred[-1].ndim == 2 else None
+
+            if chain_index is not None:
+                chain_index = chain_index.detach().cpu().numpy()
+            if residue_index is not None:
+                residue_index = residue_index.detach().cpu().numpy()
+            if atom_mask is not None:
+                atom_mask = atom_mask.detach().cpu().numpy()
             
             # Use short ID if available (for evolution workflow), otherwise use original naming
             if motif_cfg.design_id:
@@ -552,6 +564,9 @@ class LaProteinaGenerator:
                 prot_pos=coors_atom37.float().detach().cpu().numpy(),
                 aatype=residue_type.detach().cpu().numpy(),
                 file_path=str(pdb_path),
+                chain_index=chain_index,
+                residue_index=residue_index,
+                atom_mask=atom_mask,
                 overwrite=True,
                 no_indexing=True,
             )

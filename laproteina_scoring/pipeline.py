@@ -3,11 +3,12 @@ import shutil
 import pandas as pd
 from typing import Dict, Any, List, Optional
 from pathlib import Path
+import tempfile
 
 # BindCraft imports
 from colabdesign import mk_afdesign_model, clear_mem
 from functions.colabdesign_utils import predict_binder_complex
-from functions.pyrosetta_utils import score_interface
+from functions.pyrosetta_utils import score_interface, align_pdbs, unaligned_rmsd
 from colabdesign.shared.utils import copy_dict
 
 # Local imports
@@ -193,12 +194,17 @@ class LaProteinaScorer:
                  
              # Combine AF2 metrics and Rosetta metrics
              af2_stats = prediction_stats.get(model_id, {})
+             binder_position_rmsd = self._compute_binder_position_rmsd(
+                 laproteina_pdb=pdb_path,
+                 af2_refolded_pdb=relaxed_pdb,
+             )
              
              model_data = {
                  "design_name": design_name,
                  "model": model_id,
                  "sequence": binder_seq,
                  "binder_length": len(binder_seq),
+                 "Binder_Position_RMSD": binder_position_rmsd,
                  **af2_stats,
                  **interface_scores
              }
@@ -215,3 +221,46 @@ class LaProteinaScorer:
         
         # Return all model metrics
         return {"design_name": design_name, "models": final_metrics}
+
+    def _compute_binder_position_rmsd(
+        self,
+        laproteina_pdb: str,
+        af2_refolded_pdb: str,
+    ) -> Optional[float]:
+        """
+        Compare binder position between LaProteina output and AF2-refolded complex.
+
+        Procedure:
+        1) Rigidly align AF2-refolded structure to LaProteina on target chain A.
+        2) Compute unaligned RMSD on binder chain B.
+        """
+        aligned_tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix="_aligned_refold.pdb", delete=False) as tmp:
+                aligned_tmp_path = tmp.name
+
+            shutil.copyfile(af2_refolded_pdb, aligned_tmp_path)
+
+            target_chain = self.config.target_chains[0] if self.config.target_chains else "A"
+            align_pdbs(
+                reference_pdb=laproteina_pdb,
+                align_pdb=aligned_tmp_path,
+                reference_chain_id=target_chain,
+                align_chain_id=target_chain,
+            )
+
+            return unaligned_rmsd(
+                reference_pdb=laproteina_pdb,
+                align_pdb=aligned_tmp_path,
+                reference_chain_id=self.config.binder_chain,
+                align_chain_id=self.config.binder_chain,
+            )
+        except Exception as e:
+            print(f"Warning: could not compute Binder_Position_RMSD: {e}")
+            return None
+        finally:
+            if aligned_tmp_path and os.path.exists(aligned_tmp_path):
+                try:
+                    os.remove(aligned_tmp_path)
+                except Exception:
+                    pass

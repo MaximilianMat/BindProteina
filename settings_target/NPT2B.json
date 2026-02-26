@@ -1,23 +1,23 @@
 {
     "input_dir": "/nfs/homedirs/matscher/samples/",
-    "output_dir": "/nfs/homedirs/matscher/samples/samples_npt2b",
+    "output_dir": "/nfs/students/matscher/samples/samples_npt2b",
     "starting_pdb": "/nfs/homedirs/matscher/targets/npt2b_LP/npt2b.pdb",
     "chains": "A",
     "binder_name": "NPT2B",
     "target_hotspot_residues": "300-350",
     "laproteina_settings": {
-        "checkpoint_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/LD5_motif_idx_tip.ckpt",
-        "autoencoder_path": "/nfs/homedirs/matscher/repos/BindProteina/laproteina/checkpoints/AE3_motif.ckpt",
-        "laproteina_mode": "tip_atom",
-        "n_samples": 128,
-        "batch_size": 1,
-        "n_linker_starting_points": 16,
+        "checkpoint_path": "/nfs/students/matscher/laproteina_checkpoints/LD4_motif_idx_aa.ckpt",
+        "autoencoder_path": "/nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt",
+        "laproteina_mode": "all_atom",
+        "n_samples": 2048,
+        "batch_size": 2,
+        "n_linker_starting_points": 32,
         "binder_length_range": [
             30,
-            70
+            80
         ],
         "target_length": 690,
-        "linker_length_range": "5-15",
+        "linker_length_range": "5-30",
         "linker_sequence": "GGGGS"
     },
     "rosetta_relax": true

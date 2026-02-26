@@ -29,5 +29,32 @@ SCRIPT_DIR="/nfs/homedirs/matscher/repos/BindProteina"
 LAPROTEINA_ROOT="${SCRIPT_DIR}/laproteina"
 cd "$LAPROTEINA_ROOT"
 
-echo "Running binder inference in env: ${ENV_NAME}"
-python proteinfoundation/generate.py --config_name inference_motif_idx_aa_binder
+# Direct-binder inference mode:
+# - Choose variant with DIRECT_BINDER_VARIANT=aa|tip (default: aa)
+# - Or pass INFERENCE_CONFIG explicitly to override.
+DIRECT_BINDER_VARIANT="${DIRECT_BINDER_VARIANT:-aa}"
+INFERENCE_CONFIG="${INFERENCE_CONFIG:-}"
+
+if [[ -z "${INFERENCE_CONFIG}" ]]; then
+  case "${DIRECT_BINDER_VARIANT}" in
+    aa)
+      INFERENCE_CONFIG="inference_motif_idx_aa_binder"
+      ;;
+    tip)
+      INFERENCE_CONFIG="inference_motif_idx_tip_binder"
+      ;;
+    *)
+      echo "Unknown DIRECT_BINDER_VARIANT='${DIRECT_BINDER_VARIANT}'. Expected 'aa' or 'tip'."
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ ! -f "configs/${INFERENCE_CONFIG}.yaml" ]]; then
+  echo "Config not found: configs/${INFERENCE_CONFIG}.yaml"
+  exit 1
+fi
+
+echo "Running direct-binder inference in env: ${ENV_NAME}"
+echo "Using config: ${INFERENCE_CONFIG}"
+python proteinfoundation/generate.py --config_name "${INFERENCE_CONFIG}"
