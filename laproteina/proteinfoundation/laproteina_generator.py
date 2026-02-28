@@ -57,6 +57,9 @@ class MotifConfig:
     segment_order: str = "A"
     atom_selection_mode: str = "all_atom"  # all_atom (LD4), tip_atoms (LD5), ca_only, backbone
     design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
+    direct_binder_mode: bool = True
+    binder_chain_gap: int = 200
+    binder_target_nres: Optional[int] = None
 
 
 @dataclass
@@ -93,10 +96,10 @@ class LaProteinaGenerator:
         )
     """
     
-    # Map from laproteina_mode to Hydra config name
+    # Map from laproteina_mode to Hydra binder config name
     MODE_CONFIG_MAP = {
-        "all_atom": "inference_motif_idx_aa",
-        "tip_atom": "inference_motif_idx_tip",
+        "all_atom": "inference_motif_idx_aa_binder",
+        "tip_atom": "inference_motif_idx_tip_binder",
     }
     
     # Map from laproteina_mode to atom_selection_mode used in motif data processing
@@ -229,6 +232,13 @@ class LaProteinaGenerator:
                 cfg.generation.args.nsteps = gen_config.n_steps
                 cfg.generation.dataset.nsamples = gen_config.n_samples
                 cfg.generation.dataset.max_nsamples_per_batch = gen_config.max_batch_size
+                cfg.generation.dataset.direct_binder_mode = bool(
+                    motif_config.direct_binder_mode
+                )
+                cfg.generation.dataset.binder_chain_gap = int(
+                    motif_config.binder_chain_gap
+                )
+                cfg.generation.dataset.binder_target_nres = motif_config.binder_target_nres
                 
                 # Set up our custom motif task
                 cfg.generation.dataset.motif_task_name = "BINDER_GENERATION"
@@ -253,6 +263,9 @@ class LaProteinaGenerator:
                         "motif_max_length": motif_config.motif_max_length,
                         "segment_order": motif_config.segment_order,
                         "atom_selection_mode": motif_config.atom_selection_mode,
+                        "direct_binder_mode": bool(motif_config.direct_binder_mode),
+                        "binder_chain_gap": int(motif_config.binder_chain_gap),
+                        "binder_target_nres": motif_config.binder_target_nres,
                     }
                 }
                 OmegaConf.set_struct(cfg, True)
@@ -332,6 +345,9 @@ class LaProteinaGenerator:
                     "motif_task_name": "BINDER_GENERATION",
                     "nsamples": gen_config.n_samples,
                     "max_nsamples_per_batch": gen_config.max_batch_size,
+                    "direct_binder_mode": bool(motif_config.direct_binder_mode),
+                    "binder_chain_gap": int(motif_config.binder_chain_gap),
+                    "binder_target_nres": motif_config.binder_target_nres,
                     "motif_dict_cfg": {
                         "BINDER_GENERATION": {
                             "contig_string": motif_config.contig_string,
@@ -341,6 +357,9 @@ class LaProteinaGenerator:
                             "motif_max_length": motif_config.motif_max_length,
                             "segment_order": motif_config.segment_order,
                             "atom_selection_mode": motif_config.atom_selection_mode,
+                            "direct_binder_mode": bool(motif_config.direct_binder_mode),
+                            "binder_chain_gap": int(motif_config.binder_chain_gap),
+                            "binder_target_nres": motif_config.binder_target_nres,
                         }
                     },
                     "nlens_cfg": {
@@ -452,6 +471,9 @@ class LaProteinaGenerator:
             segment_order=target_chain,
             atom_selection_mode=atom_selection_mode,
             design_id=design_id,
+            direct_binder_mode=True,
+            binder_chain_gap=200,
+            binder_target_nres=target_residue_range[1],
         )
         
         gen_cfg = GenerationConfig(

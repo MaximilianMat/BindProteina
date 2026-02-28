@@ -512,15 +512,15 @@
         "higher": true
     },
     "Average_n_InterfaceUnsatHbonds": {
-        "threshold": 4,
+        "threshold": null,
         "higher": false
     },
     "1_n_InterfaceUnsatHbonds": {
-        "threshold": 4,
+        "threshold": null,
         "higher": false
     },
     "2_n_InterfaceUnsatHbonds": {
-        "threshold": 4,
+        "threshold": null,
         "higher": false
     },
     "3_n_InterfaceUnsatHbonds": {

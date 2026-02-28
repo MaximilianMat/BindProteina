@@ -20,6 +20,7 @@ import os
 import sys
 import json
 import subprocess
+import shutil
 import torch
 import numpy as np
 import pandas as pd
@@ -103,6 +104,18 @@ def collect_all_pdbs(output_dir: Path) -> List[str]:
         if "_sample_" in pdb_path.name or "job_" in pdb_path.name:
             pdbs.append(str(pdb_path))
     return pdbs
+
+
+def pdb_has_chain_b(pdb_path: str) -> bool:
+    """Return True if a PDB contains at least one ATOM record on chain B."""
+    try:
+        with open(pdb_path, "r", errors="ignore") as fh:
+            for line in fh:
+                if line.startswith("ATOM") and len(line) > 21 and line[21] == "B":
+                    return True
+    except Exception:
+        return False
+    return False
 
 
 def compute_interface_overlap(pre_residues_str: str, post_residues_str: str) -> float:
@@ -485,6 +498,15 @@ def main():
                 shutil.copy2(pdb_path, out_path)
                 scoring_pdbs.append(str(out_path))
             logger.info(f"Prepared {len(scoring_pdbs)} direct-binder structures for scoring")
+            # Guardrail: direct-binder mode must materialize an explicit chain B.
+            missing_chain_b = [p for p in scoring_pdbs if not pdb_has_chain_b(p)]
+            if missing_chain_b:
+                preview = ", ".join(Path(p).name for p in missing_chain_b[:5])
+                raise RuntimeError(
+                    "Direct-binder generation produced complexes without chain B "
+                    f"({len(missing_chain_b)}/{len(scoring_pdbs)} files; examples: {preview}). "
+                    "This indicates chain separation metadata was not propagated."
+                )
         else:
             # Build mapping from config_id to linker_length
             # Each sample may have a different linker length based on its config

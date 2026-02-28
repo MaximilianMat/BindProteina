@@ -1,5 +1,6 @@
 import os
 import shutil
+import math
 import pandas as pd
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -198,6 +199,10 @@ class LaProteinaScorer:
                  laproteina_pdb=pdb_path,
                  af2_refolded_pdb=relaxed_pdb,
              )
+             binder_sc_rmsd = self._compute_binder_sc_rmsd(
+                 laproteina_pdb=pdb_path,
+                 af2_refolded_pdb=relaxed_pdb,
+             )
              
              model_data = {
                  "design_name": design_name,
@@ -205,6 +210,7 @@ class LaProteinaScorer:
                  "sequence": binder_seq,
                  "binder_length": len(binder_seq),
                  "Binder_Position_RMSD": binder_position_rmsd,
+                 "sc_rmsd": binder_sc_rmsd,
                  **af2_stats,
                  **interface_scores
              }
@@ -257,6 +263,82 @@ class LaProteinaScorer:
             )
         except Exception as e:
             print(f"Warning: could not compute Binder_Position_RMSD: {e}")
+            return None
+        finally:
+            if aligned_tmp_path and os.path.exists(aligned_tmp_path):
+                try:
+                    os.remove(aligned_tmp_path)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _sidechain_atom_coords_by_key(pdb_path: str, chain_id: str) -> Dict[tuple, tuple]:
+        """Collect sidechain heavy-atom coordinates indexed by (resseq, icode, atom_name)."""
+        coords: Dict[tuple, tuple] = {}
+        backbone_atoms = {"N", "CA", "C", "O", "OXT"}
+        with open(pdb_path, "r", errors="ignore") as fh:
+            for line in fh:
+                if not line.startswith("ATOM") or len(line) < 54:
+                    continue
+                if line[21] != chain_id:
+                    continue
+                atom_name = line[12:16].strip()
+                if atom_name in backbone_atoms or atom_name.startswith("H"):
+                    continue
+                try:
+                    resseq = int(line[22:26].strip())
+                    icode = line[26].strip()
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                except ValueError:
+                    continue
+                key = (resseq, icode, atom_name)
+                coords[key] = (x, y, z)
+        return coords
+
+    def _compute_binder_sc_rmsd(
+        self,
+        laproteina_pdb: str,
+        af2_refolded_pdb: str,
+    ) -> Optional[float]:
+        """
+        Sidechain RMSD for binder chain B after target-chain alignment.
+        """
+        aligned_tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix="_aligned_refold.pdb", delete=False) as tmp:
+                aligned_tmp_path = tmp.name
+
+            shutil.copyfile(af2_refolded_pdb, aligned_tmp_path)
+
+            target_chain = self.config.target_chains[0] if self.config.target_chains else "A"
+            align_pdbs(
+                reference_pdb=laproteina_pdb,
+                align_pdb=aligned_tmp_path,
+                reference_chain_id=target_chain,
+                align_chain_id=target_chain,
+            )
+
+            chain_id = self.config.binder_chain
+            ref_atoms = self._sidechain_atom_coords_by_key(laproteina_pdb, chain_id)
+            aln_atoms = self._sidechain_atom_coords_by_key(aligned_tmp_path, chain_id)
+            common_keys = ref_atoms.keys() & aln_atoms.keys()
+            if len(common_keys) == 0:
+                return None
+
+            sq_sum = 0.0
+            for k in common_keys:
+                r = ref_atoms[k]
+                a = aln_atoms[k]
+                dx = r[0] - a[0]
+                dy = r[1] - a[1]
+                dz = r[2] - a[2]
+                sq_sum += dx * dx + dy * dy + dz * dz
+            rmsd = math.sqrt(sq_sum / len(common_keys))
+            return round(rmsd, 2)
+        except Exception as e:
+            print(f"Warning: could not compute sc_rmsd: {e}")
             return None
         finally:
             if aligned_tmp_path and os.path.exists(aligned_tmp_path):

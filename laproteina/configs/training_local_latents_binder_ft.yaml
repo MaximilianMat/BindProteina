@@ -1,4 +1,4 @@
-run_name_: binder_ft_relpos_lora_2
+run_name_: binder_ft_v2
 
 hardware:
   ncpus_per_task_train_: 8
@@ -47,22 +47,22 @@ training:
   n_recycle: 0
   motif_conditioning: True
   self_cond: True
-  p_folding_n_inv_folding_iters: 0.05
+  p_folding_n_inv_folding_iters: 0.1
 
 lora:
-  r: 20
+  r: null
   lora_alpha: 32.0
   lora_dropout: 0.05
   train_bias: 'lora_only'
 
 opt:
-  lr: 0.00005
+  lr: 0.00002
   max_epochs: 10000000
   accumulate_grad_batches: 4
   skip_nan_grad: False
   grad_and_weight_analysis: False
   dist_strategy: auto
-  val_check_interval: 1000
+  val_check_interval: 3000
 
 log:
   wandb_project: laproteina
@@ -70,14 +70,14 @@ log:
   log_every_n_steps: 10
   checkpoint: True
   checkpoint_dir: /nfs/students/matscher/laproteina_checkpoints
-  checkpoint_every_n_steps: 5000
-  last_ckpt_every_n_steps: 2000
-  save_top_k: 3
+  checkpoint_every_n_steps: 3000
+  last_ckpt_every_n_steps: 1000
+  save_top_k: 5
 
 seed: 42
 
 ema:
-  decay: 0.999
+  decay: 0.9995
   validate_original_weights: False
   every_n_steps: 1
   cpu_offload: False

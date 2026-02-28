@@ -14,7 +14,7 @@ case "${PHASE}" in
     python proteinfoundation/train.py \
       --config-name training_local_latents_binder_ft \
       +single=true \
-      run_name_=binder_ft_relpos_lora_smoke \
+      run_name_=binder_ft_v2_smoke \
       opt.max_epochs=1 \
       opt.val_check_interval=100 \
       log.checkpoint=false \
@@ -29,13 +29,13 @@ case "${PHASE}" in
     python proteinfoundation/train.py \
       --config-name training_local_latents_binder_ft \
       +single=true \
-      run_name_=binder_ft_relpos_lora_2 \
+      run_name_=binder_ft_v2 \
       dataset.datamodule.dataselector.fraction=0.1
 
     python proteinfoundation/train.py \
       --config-name training_local_latents_binder_ft \
       +single=true \
-      run_name_=binder_ft_relpos_lora_2 \
+      run_name_=binder_ft_v2 \
       dataset=pdb/pdb_train_motif_aa \
       dataset.datamodule.dataselector.fraction=0.1
     ;;
@@ -44,7 +44,7 @@ case "${PHASE}" in
     python proteinfoundation/train.py \
       --config-name training_local_latents_binder_ft \
       +single=true \
-      run_name_=binder_ft_relpos_partial_unfreeze \
+      run_name_=binder_ft_v2_unfreeze \
       lora.r=null \
       opt.lr=0.00002 \
       opt.accumulate_grad_batches=2 \

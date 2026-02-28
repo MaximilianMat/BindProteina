@@ -4,8 +4,8 @@ defaults:
   - _self_
 
 run_name_: laproteina_ft_reference
-ckpt_path: /nfs/students/matscher/laproteina_checkpoints/
-ckpt_name: LD4_motif_idx_aa.ckpt
+ckpt_path: /nfs/students/matscher/laproteina_checkpoints/binder_ft/checkpoints
+ckpt_name: chk_epoch=00000494_step=000000310000-EMA.ckpt
 autoencoder_ckpt_path: /nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt
 
 generation:
