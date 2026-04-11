@@ -88,6 +88,7 @@ def generate_samples_for_config(
             output_dir=str(config_output_dir),
             contig_string=prepared_target.contig_string,
             design_id=f"cfg{config_idx:03d}",
+            direct_binder_mode=False,
             max_batch_size=max_batch_size  # Reduce batch size for memory
         )
         return generated_pdbs
@@ -279,6 +280,36 @@ def main():
     )
     if isinstance(direct_binder_mode, str):
         direct_binder_mode = direct_binder_mode.strip().lower() in {"1", "true", "yes", "on"}
+
+    linked_input_mode = settings.get(
+        "linked_input_mode",
+        lp_settings.get("linked_input_mode", False),
+    )
+    if isinstance(linked_input_mode, str):
+        linked_input_mode = linked_input_mode.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _parse_optional_int(value, field_name: str) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            logger.error(f"{field_name} must be an integer, got: {value!r}")
+            sys.exit(1)
+
+    linked_target_length = _parse_optional_int(
+        settings.get("target_length", lp_settings.get("target_length")),
+        "target_length",
+    )
+    linked_linker_length = _parse_optional_int(
+        settings.get("linker_length", lp_settings.get("linker_length")),
+        "linker_length",
+    )
+    keep_linker_end_n = _parse_optional_int(
+        settings.get("keep_linker_end_n", lp_settings.get("keep_linker_end_n", 0)),
+        "keep_linker_end_n",
+    )
+    keep_linker_end_n = keep_linker_end_n if keep_linker_end_n is not None else 0
     
     # LaProteina mode: "all_atom" (LD4) or "tip_atom" (LD5)
     # Controls which model config, feature factory class, and atom selection are used
@@ -286,11 +317,16 @@ def main():
     if laproteina_mode not in ("all_atom", "tip_atom"):
         logger.error(f"Invalid laproteina_mode: {laproteina_mode!r}. Must be 'all_atom' or 'tip_atom'")
         sys.exit(1)
+
+    inference_config = settings.get("inference_config", lp_settings.get("inference_config"))
+    if linked_input_mode and not inference_config:
+        inference_config = "inference_motif_idx_aa"
     
     logger.info(f"Settings:")
     logger.info(f"  target_pdb: {target_pdb}")
     logger.info(f"  checkpoint: {checkpoint}")
     logger.info(f"  laproteina_mode: {laproteina_mode}")
+    logger.info(f"  inference_config: {inference_config or '(mode default)'}")
     logger.info(f"  linker_length_range: {linker_length_range}")
     logger.info(f"  n_total_samples: {n_total_samples}")
     logger.info(f"  n_linker_starting_points: {n_linker_starting_points}")
@@ -299,6 +335,7 @@ def main():
     logger.info(f"  binder_length_range: {binder_length_range}")
     logger.info(f"  batch_size: {batch_size}")
     logger.info(f"  direct_binder_mode: {direct_binder_mode}")
+    logger.info(f"  linked_input_mode: {linked_input_mode}")
     
     # Create output directory
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
@@ -318,70 +355,183 @@ def main():
     if not os.path.exists(target_pdb):
         logger.error(f"Target PDB not found: {target_pdb}")
         sys.exit(1)
-    
-    if not direct_binder_mode and not hotspot_string:
+
+    if direct_binder_mode and linked_input_mode:
+        logger.error("direct_binder_mode and linked_input_mode are mutually exclusive.")
+        sys.exit(1)
+
+    if linked_input_mode:
+        if linked_target_length is None or linked_linker_length is None:
+            logger.error(
+                "linked_input_mode requires explicit target_length and linker_length in settings."
+            )
+            sys.exit(1)
+        if linked_target_length <= 0:
+            logger.error(f"target_length must be > 0, got {linked_target_length}")
+            sys.exit(1)
+        if linked_linker_length < 0:
+            logger.error(f"linker_length must be >= 0, got {linked_linker_length}")
+            sys.exit(1)
+        if keep_linker_end_n < 0:
+            logger.error(f"keep_linker_end_n must be >= 0, got {keep_linker_end_n}")
+            sys.exit(1)
+        if keep_linker_end_n > linked_linker_length:
+            logger.error(
+                f"keep_linker_end_n ({keep_linker_end_n}) cannot exceed linker_length ({linked_linker_length})"
+            )
+            sys.exit(1)
+    elif not direct_binder_mode and not hotspot_string:
         logger.error("target_hotspot_residues is required for linker generation")
         sys.exit(1)
-    
-    # Get target length
-    target_length = get_target_length(target_pdb, chain_id="A")
-    logger.info(f"Target protein: {Path(target_pdb).name}, length: {target_length}")
+
+    # Get target chain-A length from input PDB.
+    chain_a_length = get_target_length(target_pdb, chain_id="A")
+    if linked_input_mode:
+        if linked_target_length + linked_linker_length > chain_a_length:
+            logger.error(
+                "Invalid linked-input boundaries: target_length + linker_length exceeds "
+                f"chain A length ({linked_target_length} + {linked_linker_length} > {chain_a_length})."
+            )
+            sys.exit(1)
+        target_length = linked_target_length
+        logger.info(
+            f"Linked input boundaries: target_length={linked_target_length}, "
+            f"linker_length={linked_linker_length}, keep_linker_end_n={keep_linker_end_n}"
+        )
+        logger.info(
+            f"Input chain A length: {chain_a_length}, fixed generation context: "
+            f"A1-{linked_target_length + linked_linker_length}"
+        )
+    else:
+        target_length = chain_a_length
+
+    logger.info(f"Target protein: {Path(target_pdb).name}, chain-A length: {chain_a_length}")
     
     prepared_targets = []
     if not direct_binder_mode:
-        # =========================================================================
-        # Phase 1: Generate Linker Configurations
-        # =========================================================================
-        logger.info("=" * 60)
-        logger.info("Phase 1: Generating Linker Configurations")
-        logger.info("=" * 60)
-        
-        linker_generator = LinkerConfigGenerator(
-            hotspot_string=hotspot_string,
-            linker_length_range=linker_length_range,
-            mode=linker_mode,
-            n_attachment_points=n_linker_starting_points  # Evenly space attachment points across hotspot
-        )
-        
-        linker_configs = linker_generator.generate_configs(n_linker_starting_points)
-        logger.info(f"Generated {len(linker_configs)} linker configurations")
-        logger.info(linker_generator.get_edge_summary())
-        
-        # Save linker configs
-        linker_configs_data = [
-            {
-                "config_id": cfg.config_id,
-                "attachment_residue": cfg.attachment_residue,
-                "linker_length": cfg.linker_length,
-                "edge_type": cfg.edge_type,
-                "hotspot_range": cfg.hotspot_range
-            }
-            for cfg in linker_configs
-        ]
-        with open(output_dir / "linker_configs.json", 'w') as f:
-            json.dump(linker_configs_data, f, indent=2)
-        
-        # =========================================================================
-        # Phase 2: Prepare Targets with Linkers
-        # =========================================================================
-        logger.info("=" * 60)
-        logger.info("Phase 2: Preparing Targets with Linkers")
-        logger.info("=" * 60)
-        
-        prepared_targets_dir = output_dir / "prepared_targets"
-        target_preparer = TargetPreparer(
-            output_dir=str(prepared_targets_dir),
-            linker_mode="polyglycine"  # Fast mode for initial generation
-        )
-        
-        prepared_targets = target_preparer.prepare_batch(
-            target_pdb=target_pdb,
-            linker_configs=linker_configs,
-            binder_length_range=binder_length_range,
-            chain_id="A"
-        )
-        
-        logger.info(f"Prepared {len(prepared_targets)} target+linker combinations")
+        if linked_input_mode:
+            logger.info("=" * 60)
+            logger.info("Phase 1/2: Linked Input Mode (use provided target+linker)")
+            logger.info("=" * 60)
+            logger.info(
+                "Skipping synthetic linker generation. Using linked input PDB with explicit boundaries."
+            )
+
+            prepared_targets_dir = output_dir / "prepared_targets"
+            prepared_targets_dir.mkdir(parents=True, exist_ok=True)
+            prepared_target_path = prepared_targets_dir / f"{Path(target_pdb).stem}_linked_input.pdb"
+            shutil.copy2(target_pdb, prepared_target_path)
+
+            linked_cfg = LinkerConfig(
+                attachment_residue=linked_target_length,
+                linker_length=linked_linker_length,
+                edge_type="linked_input",
+                hotspot_range=(linked_target_length, linked_target_length),
+                config_id="cfg000_linked_input",
+            )
+            binder_min, binder_max = binder_length_range
+            total_fixed_length = linked_target_length + linked_linker_length
+            contig_string = f"A1-{total_fixed_length}/{binder_min}-{binder_max}"
+
+            prepared_targets = [
+                PreparedTarget(
+                    pdb_path=str(prepared_target_path),
+                    contig_string=contig_string,
+                    target_length=linked_target_length,
+                    linker_length=linked_linker_length,
+                    total_fixed_length=total_fixed_length,
+                    linker_config=linked_cfg,
+                    metadata={
+                        "original_target": target_pdb,
+                        "chain_id": "A",
+                        "binder_length_range": binder_length_range,
+                        "linker_mode": "linked_input",
+                        "hotspot_range": linked_cfg.hotspot_range,
+                        "attachment_residue": linked_cfg.attachment_residue,
+                        "positioning_method": "provided_linked_input",
+                        "context_length": total_fixed_length,
+                        "linked_input_mode": True,
+                        "keep_linker_end_n": keep_linker_end_n,
+                    },
+                )
+            ]
+
+            with open(output_dir / "linker_configs.json", "w") as f:
+                json.dump(
+                    [
+                        {
+                            "config_id": linked_cfg.config_id,
+                            "attachment_residue": linked_cfg.attachment_residue,
+                            "linker_length": linked_cfg.linker_length,
+                            "edge_type": linked_cfg.edge_type,
+                            "hotspot_range": linked_cfg.hotspot_range,
+                            "linked_input_mode": True,
+                        }
+                    ],
+                    f,
+                    indent=2,
+                )
+            logger.info("Prepared 1/1 target+linker combinations from linked input")
+        else:
+            # =========================================================================
+            # Phase 1: Generate Linker Configurations
+            # =========================================================================
+            logger.info("=" * 60)
+            logger.info("Phase 1: Generating Linker Configurations")
+            logger.info("=" * 60)
+
+            linker_generator = LinkerConfigGenerator(
+                hotspot_string=hotspot_string,
+                linker_length_range=linker_length_range,
+                mode=linker_mode,
+                n_attachment_points=n_linker_starting_points  # Evenly space attachment points across hotspot
+            )
+
+            linker_configs = linker_generator.generate_configs(n_linker_starting_points)
+            logger.info(f"Generated {len(linker_configs)} linker configurations")
+            logger.info(linker_generator.get_edge_summary())
+
+            # Save linker configs
+            linker_configs_data = [
+                {
+                    "config_id": cfg.config_id,
+                    "attachment_residue": cfg.attachment_residue,
+                    "linker_length": cfg.linker_length,
+                    "edge_type": cfg.edge_type,
+                    "hotspot_range": cfg.hotspot_range
+                }
+                for cfg in linker_configs
+            ]
+            with open(output_dir / "linker_configs.json", 'w') as f:
+                json.dump(linker_configs_data, f, indent=2)
+
+            # =========================================================================
+            # Phase 2: Prepare Targets with Linkers
+            # =========================================================================
+            logger.info("=" * 60)
+            logger.info("Phase 2: Preparing Targets with Linkers")
+            logger.info("=" * 60)
+
+            prepared_targets_dir = output_dir / "prepared_targets"
+            target_preparer = TargetPreparer(
+                output_dir=str(prepared_targets_dir),
+                linker_mode="polyglycine"  # Fast mode for initial generation
+            )
+
+            prepared_targets = target_preparer.prepare_batch(
+                target_pdb=target_pdb,
+                linker_configs=linker_configs,
+                binder_length_range=binder_length_range,
+                chain_id="A"
+            )
+
+            logger.info(f"Prepared {len(prepared_targets)} target+linker combinations")
+            if len(prepared_targets) == 0:
+                logger.error(
+                    "No target+linker combinations could be prepared. "
+                    "Check hotspot settings and linker parameters."
+                )
+                sys.exit(1)
     else:
         logger.info("=" * 60)
         logger.info("Phase 1/2: Direct Binder Mode (no linker generation)")
@@ -418,6 +568,7 @@ def main():
         autoencoder_path=str(ae_path) if ae_path.exists() else None,
         device=device,
         laproteina_mode=laproteina_mode,
+        inference_config=inference_config,
     )
     generator._load_model()  # Preload model
     
@@ -434,6 +585,8 @@ def main():
             n_samples=n_total_samples,
             output_dir=str(generated_dir),
             design_id="direct",
+            direct_binder_mode=True,
+            binder_target_nres=target_length,
             max_batch_size=batch_size,
         )
         all_generated_pdbs.extend(direct_samples)
@@ -441,6 +594,9 @@ def main():
     else:
         # Distribute total samples evenly across linker starting points
         n_configs = len(prepared_targets)
+        if n_configs == 0:
+            logger.error("No prepared targets available for non-direct generation.")
+            sys.exit(1)
         samples_per_config = n_total_samples // n_configs
         remainder = n_total_samples % n_configs
         
@@ -547,6 +703,7 @@ def main():
                     pdb_path=pdb_path,
                     target_length=target_length,
                     linker_length=linker_len,
+                    keep_linker_end_n=keep_linker_end_n,
                     output_path=str(scoring_input_dir / Path(pdb_path).name)
                 )
                 if result:
@@ -567,6 +724,7 @@ def main():
                     original_target_pdb=target_pdb,
                     target_length=target_length,
                     linker_length=linker_len,
+                    keep_linker_end_n=keep_linker_end_n,
                     output_path=str(output_path)
                 )
                 if result:
@@ -982,6 +1140,8 @@ def main():
         "target_pdb": target_pdb,
         "n_linker_starting_points": n_linker_starting_points,
         "direct_binder_mode": direct_binder_mode,
+        "linked_input_mode": linked_input_mode,
+        "keep_linker_end_n": keep_linker_end_n,
         "samples_per_starting_point": samples_per_starting_point,
         "n_total_samples_requested": n_total_samples,
         "total_generated": len(all_generated_pdbs),

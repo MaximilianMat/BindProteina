@@ -153,6 +153,52 @@ class TargetPreparer:
         logger.info(f"Hotspot region: {hotspot_start}-{hotspot_end} ({hotspot_size} residues)")
         logger.info(f"Linker config: attachment={linker_config.attachment_residue}, "
                     f"length={linker_config.linker_length}, position={linker_config.edge_type}")
+
+        # Special case: zero-length linker means "use current chain end as-is".
+        # This enables linked-input workflows without direct_binder_mode.
+        if linker_config.linker_length <= 0:
+            prepared_target = full_target.copy()
+            prepared_target.chain_id[:] = "A"
+
+            target_residue_ids = sorted(np.unique(prepared_target.res_id))
+            res_map = {old: new for new, old in enumerate(target_residue_ids, 1)}
+            for old, new in res_map.items():
+                mask = prepared_target.res_id == old
+                prepared_target.res_id[mask] = new + 100000
+            prepared_target.res_id = prepared_target.res_id - 100000
+
+            binder_min, binder_max = binder_length_range
+            total_fixed_length = target_length
+            contig_string = f"A1-{total_fixed_length}/{binder_min}-{binder_max}"
+
+            target_name = Path(target_pdb).stem
+            output_filename = f"{target_name}_{linker_config.config_id}.pdb"
+            output_path = self.output_dir / output_filename
+            strucio.save_structure(str(output_path), prepared_target)
+
+            logger.info(
+                "Zero-length linker config detected; using original target as fixed context "
+                f"(contig: {contig_string})"
+            )
+
+            return PreparedTarget(
+                pdb_path=str(output_path),
+                contig_string=contig_string,
+                target_length=target_length,
+                linker_length=0,
+                total_fixed_length=total_fixed_length,
+                linker_config=linker_config,
+                metadata={
+                    "original_target": target_pdb,
+                    "chain_id": chain_id,
+                    "binder_length_range": binder_length_range,
+                    "linker_mode": self.linker_mode,
+                    "hotspot_range": linker_config.hotspot_range,
+                    "attachment_residue": linker_config.attachment_residue,
+                    "positioning_method": "none_zero_length_linker",
+                    "context_length": target_length,
+                },
+            )
         
         # Step 1: Extract LARGE focused region around the attachment point
         # Use maximum context: entire hotspot + 100 residues buffer on each side
@@ -611,24 +657,34 @@ def remove_linker_from_output(
     pdb_path: str,
     target_length: int,
     linker_length: int,
+    keep_linker_end_n: int,
     output_path: str
 ) -> str:
     """
     Remove the linker from LaProteina output to get clean target + binder.
     
-    LaProteina output has: target (1..target_len) + linker (target_len+1..target_len+linker_len) + binder
-    We want: target (chain A) + binder (chain B)
+    LaProteina output has: target (1..target_len) + linker (target_len+1..target_len+linker_len) + binder.
+    We output: target (chain A) + (kept linker tail + binder) (chain B).
     
     Args:
         pdb_path: Path to LaProteina output PDB
         target_length: Length of original target
         linker_length: Length of linker to remove
+        keep_linker_end_n: Number of residues to keep from linker C-terminus as
+            binder seed (0 means remove full linker)
         output_path: Path to save cleaned PDB
         
     Returns:
         Path to cleaned PDB file
     """
     structure = strucio.load_structure(pdb_path)
+
+    if keep_linker_end_n < 0:
+        raise ValueError(f"keep_linker_end_n must be >= 0, got {keep_linker_end_n}")
+    if keep_linker_end_n > linker_length:
+        raise ValueError(
+            f"keep_linker_end_n ({keep_linker_end_n}) cannot exceed linker_length ({linker_length})"
+        )
     
     # Get all residue IDs
     all_res_ids = sorted(np.unique(structure.res_id))
@@ -642,6 +698,10 @@ def remove_linker_from_output(
     
     # Linker residues: target_length+1 to target_length+linker_length
     linker_res_ids = [r for r in all_res_ids if linker_start <= r <= linker_end]
+
+    # Keep only the final N linker residues as binder seed (if requested)
+    linker_keep_ids = linker_res_ids[-keep_linker_end_n:] if keep_linker_end_n > 0 else []
+    linker_removed_ids = linker_res_ids[:-keep_linker_end_n] if keep_linker_end_n > 0 else linker_res_ids
     
     # Binder residues: everything after linker
     binder_res_ids = [r for r in all_res_ids if r > linker_end]
@@ -650,13 +710,17 @@ def remove_linker_from_output(
         logger.warning(f"No binder residues found in {pdb_path}")
         return pdb_path
     
-    logger.info(f"Removing linker: target={len(target_res_ids)} res, "
-               f"linker={len(linker_res_ids)} res (removed), "
-               f"binder={len(binder_res_ids)} res")
+    logger.info(
+        f"Removing linker: target={len(target_res_ids)} res, "
+        f"linker_removed={len(linker_removed_ids)} res, "
+        f"linker_kept={len(linker_keep_ids)} res, "
+        f"binder={len(binder_res_ids)} res"
+    )
     
-    # Extract target and binder (skip linker)
+    # Extract target and chain-B residues (kept linker tail + binder)
+    chain_b_res_ids = sorted(linker_keep_ids + binder_res_ids)
     target_mask = np.isin(structure.res_id, target_res_ids)
-    binder_mask = np.isin(structure.res_id, binder_res_ids)
+    binder_mask = np.isin(structure.res_id, chain_b_res_ids)
     
     target_atoms = structure[target_mask].copy()
     binder_atoms = structure[binder_mask].copy()
@@ -670,8 +734,8 @@ def remove_linker_from_output(
         target_atoms.res_id[target_atoms.res_id == old_id] = new_id + 100000
     target_atoms.res_id = target_atoms.res_id - 100000
     
-    # Renumber binder 1..M
-    for new_id, old_id in enumerate(sorted(binder_res_ids), 1):
+    # Renumber chain B 1..M (kept linker tail first, then binder)
+    for new_id, old_id in enumerate(chain_b_res_ids, 1):
         binder_atoms.res_id[binder_atoms.res_id == old_id] = new_id + 100000
     binder_atoms.res_id = binder_atoms.res_id - 100000
     
@@ -689,6 +753,7 @@ def batch_remove_linker(
     pdb_paths: List[str],
     target_length: int,
     linker_length: int,
+    keep_linker_end_n: int,
     output_dir: str
 ) -> List[str]:
     """
@@ -714,6 +779,7 @@ def batch_remove_linker(
                 pdb_path=pdb_path,
                 target_length=target_length,
                 linker_length=linker_length,
+                keep_linker_end_n=keep_linker_end_n,
                 output_path=str(output_path)
             )
             cleaned_paths.append(cleaned)
@@ -729,19 +795,22 @@ def create_pyrosetta_input(
     original_target_pdb: str,
     target_length: int,
     linker_length: int,
+    keep_linker_end_n: int,
     output_path: str
 ) -> str:
     """
     Create PyRosetta input: original starting target + extracted binder.
     
-    This combines the ORIGINAL target PDB (not the one with linker) with
-    the binder extracted from LaProteina output.
+    This combines the target core with chain B built from
+    (kept linker tail + generated binder) extracted from LaProteina output.
     
     Args:
         pdb_path: Path to LaProteina output PDB (target + linker + binder)
         original_target_pdb: Path to the original starting target PDB
         target_length: Length of original target
         linker_length: Length of linker to skip
+        keep_linker_end_n: Number of linker residues to keep from C-terminus
+            as binder seed
         output_path: Path to save the PyRosetta input PDB
         
     Returns:
@@ -749,15 +818,36 @@ def create_pyrosetta_input(
     """
     # Load LaProteina output
     laproteina_output = strucio.load_structure(pdb_path)
+
+    if keep_linker_end_n < 0:
+        raise ValueError(f"keep_linker_end_n must be >= 0, got {keep_linker_end_n}")
+    if keep_linker_end_n > linker_length:
+        raise ValueError(
+            f"keep_linker_end_n ({keep_linker_end_n}) cannot exceed linker_length ({linker_length})"
+        )
     
     # Load original target
     original_target = strucio.load_structure(original_target_pdb)
     original_target = original_target[original_target.chain_id == "A"]
+    target_core_ids = [r for r in sorted(np.unique(original_target.res_id)) if r <= target_length]
+    if not target_core_ids:
+        logger.warning(
+            f"No target residues <= {target_length} found in {original_target_pdb}; "
+            "falling back to first target_length residues by order."
+        )
+        ordered_ids = sorted(np.unique(original_target.res_id))
+        target_core_ids = ordered_ids[:target_length]
+    target_core_mask = np.isin(original_target.res_id, target_core_ids)
+    original_target = original_target[target_core_mask]
     
     # Get all residue IDs from LaProteina output
     all_res_ids = sorted(np.unique(laproteina_output.res_id))
     
     # Identify binder residues (after target + linker)
+    linker_start = target_length + 1
+    linker_end = target_length + linker_length
+    linker_res_ids = [r for r in all_res_ids if linker_start <= r <= linker_end]
+    linker_keep_ids = linker_res_ids[-keep_linker_end_n:] if keep_linker_end_n > 0 else []
     binder_start = target_length + linker_length + 1
     binder_res_ids = [r for r in all_res_ids if r >= binder_start]
     
@@ -765,8 +855,9 @@ def create_pyrosetta_input(
         logger.warning(f"No binder residues found in {pdb_path}")
         return pdb_path
     
-    # Extract binder atoms
-    binder_mask = np.isin(laproteina_output.res_id, binder_res_ids)
+    # Extract kept linker tail + binder atoms
+    chain_b_res_ids = sorted(linker_keep_ids + binder_res_ids)
+    binder_mask = np.isin(laproteina_output.res_id, chain_b_res_ids)
     binder_atoms = laproteina_output[binder_mask].copy()
     
     # Prepare original target (chain A, renumber 1..N)
@@ -779,7 +870,7 @@ def create_pyrosetta_input(
     
     # Prepare binder (chain B, renumber 1..M)
     binder_atoms.chain_id[:] = "B"
-    for new_id, old_id in enumerate(sorted(binder_res_ids), 1):
+    for new_id, old_id in enumerate(chain_b_res_ids, 1):
         binder_atoms.res_id[binder_atoms.res_id == old_id] = new_id + 100000
     binder_atoms.res_id = binder_atoms.res_id - 100000
     
@@ -798,6 +889,7 @@ def batch_create_pyrosetta_input(
     original_target_pdb: str,
     target_length: int,
     linker_length: int,
+    keep_linker_end_n: int,
     output_dir: str
 ) -> List[str]:
     """
@@ -827,6 +919,7 @@ def batch_create_pyrosetta_input(
                 original_target_pdb=original_target_pdb,
                 target_length=target_length,
                 linker_length=linker_length,
+                keep_linker_end_n=keep_linker_end_n,
                 output_path=str(output_path)
             )
             pyrosetta_paths.append(result)

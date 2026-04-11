@@ -57,7 +57,7 @@ class MotifConfig:
     segment_order: str = "A"
     atom_selection_mode: str = "all_atom"  # all_atom (LD4), tip_atoms (LD5), ca_only, backbone
     design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
-    direct_binder_mode: bool = True
+    direct_binder_mode: bool = False
     binder_chain_gap: int = 200
     binder_target_nres: Optional[int] = None
 
@@ -115,6 +115,7 @@ class LaProteinaGenerator:
         base_config_path: Optional[str] = None,
         device: str = "cuda",
         laproteina_mode: str = "all_atom",
+        inference_config: Optional[str] = None,
     ):
         """
         Initialize the generator by loading model weights.
@@ -127,6 +128,8 @@ class LaProteinaGenerator:
             laproteina_mode: "all_atom" for LD4 model, "tip_atom" for LD5 model.
                 Controls which Hydra config, feature factory class, and atom selection
                 mode are used.
+            inference_config: Optional explicit Hydra inference config name. If not
+                provided, defaults to MODE_CONFIG_MAP[laproteina_mode].
         """
         if laproteina_mode not in self.MODE_CONFIG_MAP:
             raise ValueError(
@@ -135,6 +138,7 @@ class LaProteinaGenerator:
             )
         
         self.laproteina_mode = laproteina_mode
+        self.inference_config = inference_config or self.MODE_CONFIG_MAP[laproteina_mode]
         self.checkpoint_path = Path(checkpoint_path)
         self.autoencoder_path = Path(autoencoder_path) if autoencoder_path else None
         self.device = device
@@ -162,7 +166,7 @@ class LaProteinaGenerator:
         
         logger.info(
             f"LaProteinaGenerator initialized: mode={laproteina_mode}, "
-            f"config={self.MODE_CONFIG_MAP[laproteina_mode]}, "
+            f"config={self.inference_config}, "
             f"checkpoint={self.checkpoint_path}"
         )
     
@@ -222,11 +226,15 @@ class LaProteinaGenerator:
         try:
             # Try to use Hydra to load the official config
             with hydra_config_context(config_dir):
-                # Load the motif generation config based on laproteina_mode
-                config_name = self.MODE_CONFIG_MAP[self.laproteina_mode]
+                # Load the motif generation config from explicit override or mode default.
+                config_name = self.inference_config
                 logger.info(f"Loading Hydra config: {config_name}")
                 cfg = compose(config_name=config_name)
-                
+
+                # Allow adding cross-config fields (e.g. direct_binder_mode on motif config)
+                # without triggering struct-key errors.
+                OmegaConf.set_struct(cfg, False)
+
                 # Override with our specific settings
                 cfg.seed = gen_config.seed
                 cfg.generation.args.nsteps = gen_config.n_steps
@@ -406,7 +414,10 @@ class LaProteinaGenerator:
         linker_length: int = 0,
         max_batch_size: int = 2,
         contig_string: Optional[str] = None, # Allow override for complex contigs
-        design_id: Optional[str] = None  # Short unique ID for naming (used in evolution workflow)
+        design_id: Optional[str] = None,  # Short unique ID for naming (used in evolution workflow)
+        direct_binder_mode: bool = False,
+        binder_chain_gap: int = 200,
+        binder_target_nres: Optional[int] = None,
     ) -> List[str]:
         """
         Generate binder candidates for a target protein.
@@ -424,6 +435,12 @@ class LaProteinaGenerator:
             seed: Random seed for reproducibility
             contig_string: Optional custom contig string (e.g. A1-100/10-20/A120-150)
                            If provided, this overrides standard contig construction.
+            direct_binder_mode: Whether to emit chain metadata that enforces a
+                target/binder chain break during sampling.
+            binder_chain_gap: Residue index gap used between target and binder
+                when direct_binder_mode is enabled.
+            binder_target_nres: Optional explicit target length for direct-binder
+                chain break metadata. Defaults to target_residue_range end.
             
         Returns:
             List of paths to generated PDB files
@@ -471,9 +488,13 @@ class LaProteinaGenerator:
             segment_order=target_chain,
             atom_selection_mode=atom_selection_mode,
             design_id=design_id,
-            direct_binder_mode=True,
-            binder_chain_gap=200,
-            binder_target_nres=target_residue_range[1],
+            direct_binder_mode=bool(direct_binder_mode),
+            binder_chain_gap=int(binder_chain_gap),
+            binder_target_nres=(
+                int(binder_target_nres)
+                if binder_target_nres is not None
+                else int(target_residue_range[1])
+            ),
         )
         
         gen_cfg = GenerationConfig(

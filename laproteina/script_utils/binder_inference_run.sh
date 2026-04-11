@@ -9,6 +9,12 @@ set -euo pipefail
 #
 # Override checkpoint (e.g. fine-tuned):
 #   bash laproteina/script_utils/binder_inference_run.sh /path/to/finetuned.ckpt
+#
+# Convert LoRA checkpoint before inference (no code changes required):
+#   python proteinfoundation/merge_lora_checkpoint.py \
+#     --input_ckpt /path/to/finetuned_lora.ckpt \
+#     --output_ckpt /path/to/finetuned_lora_merged.ckpt
+#   bash laproteina/script_utils/binder_inference_run.sh /path/to/finetuned_lora_merged.ckpt
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAPROTEINA_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"

@@ -1,0 +1,26 @@
+{
+    "input_dir": "/nfs/homedirs/matscher/samples/",
+    "output_dir": "/nfs/students/matscher/samples/samples_pdl1_linked_cut",
+    "starting_pdb": "/nfs/homedirs/matscher/targets/pdl1/target_linker_half_helix_cut.pdb",
+    "chains": "A",
+    "binder_name": "PDL1_LINKED_INPUT_SEED",
+    "linked_input_mode": true,
+    "target_length": 216,
+    "linker_length": 12,
+    "keep_linker_end_n": 9,
+    "direct_binder_mode": false,
+    "laproteina_settings": {
+        "checkpoint_path": "/nfs/students/matscher/laproteina_checkpoints/binder_ft_relpos_lora_h200/checkpoints/chk_epoch=00000163_step=000000085000_merged.ckpt",
+        "autoencoder_path": "/nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt",
+        "laproteina_mode": "all_atom",
+        "inference_config": "inference_motif_idx_aa",
+        "n_samples": 10,
+        "batch_size": 2,
+        "n_linker_starting_points": 1,
+        "binder_length_range": [
+            30,
+            80
+        ]
+    },
+    "rosetta_relax": true
+}
