@@ -33,5 +33,5 @@ cd $SCRIPT_DIR
 echo "Running LaProteina V2 Lineage Evolution"
 echo "Arguments: $@"
 # Pass all arguments directly to the python script
-python -u laproteina/proteinfoundation/evolve_v2.py "$@"
+python -u pipeline/evolve_v2.py "$@"
 

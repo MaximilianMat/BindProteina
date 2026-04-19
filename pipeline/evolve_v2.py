@@ -39,11 +39,11 @@ from typing import List, Dict, Optional, Tuple
 import shutil
 
 # Adjust path to import BindProteina modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from laproteina.proteinfoundation.optimizer import IterativeOptimizer
-from laproteina.proteinfoundation.laproteina_generator import LaProteinaGenerator
-from laproteina.proteinfoundation.config_builder import get_pdb_chain_length
+from pipeline.optimizer import IterativeOptimizer
+from pipeline.laproteina_generator import LaProteinaGenerator
+from pipeline.config_builder import get_pdb_chain_length
 
 
 @dataclass
@@ -109,7 +109,7 @@ def load_lineages_from_csv(
     
     Each seed becomes an independent lineage.
     """
-    from laproteina.proteinfoundation.utils.pdb_slicer import parse_hotspot_string
+    from pipeline.utils.pdb_slicer import parse_hotspot_string
     
     df = pd.read_csv(scoring_csv)
     
@@ -388,7 +388,11 @@ def evolve_lineage_single_round(
     metric: str,
     output_dir: Path,
     target_hotspot_residues: Optional[str] = None,
-    target_blacklist_residues: Optional[str] = None
+    target_blacklist_residues: Optional[str] = None,
+    folding_model: str = "af2",
+    protenix_model_name: str = "protenix-v2",
+    target_msa: Optional[str] = None,
+    msa_db_path: Optional[str] = None,
 ) -> Lineage:
     """
     Evolve a single lineage for one round.
@@ -493,19 +497,19 @@ def evolve_lineage_single_round(
     # Phase 4: Score variants
     score_output_dir = round_dir / "scored"
     
-    score_cmd = [
-        sys.executable,
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))),
-            "laproteina_scoring", "score.py"
-        ),
-        "--input_dir", str(scoring_input_dir),
-        "--output_dir", str(score_output_dir),
-    ]
-    
     try:
-        subprocess.run(score_cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
+        from pipeline.scoring.scorer import score_complexes
+        score_complexes(
+            input_dir=str(scoring_input_dir),
+            output_dir=str(score_output_dir),
+            filters_path=None,
+            af2_model_idx=None,
+            folding_model=folding_model,
+            protenix_model_name=protenix_model_name,
+            target_msa=target_msa,
+            msa_db_path=msa_db_path,
+        )
+    except Exception as e:
         logger.error(f"  Scoring failed: {e}")
         lineage.status = "failed"
         return lineage
@@ -540,7 +544,7 @@ def evolve_lineage_single_round(
     
     # Filter by hotspot/blacklist if specified
     if target_hotspot_residues or target_blacklist_residues:
-        from laproteina.proteinfoundation.utils.pdb_slicer import parse_hotspot_string
+        from pipeline.utils.pdb_slicer import parse_hotspot_string
         hotspot_ranges = parse_hotspot_string(target_hotspot_residues or "")
         blacklist_ranges = parse_hotspot_string(target_blacklist_residues or "")
         
@@ -693,6 +697,14 @@ def main():
     parser.add_argument("--target_blacklist_residues", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoints")
+    parser.add_argument("--folding_model", type=str, default="af2", choices=["af2", "protenix"],
+                        help="Folding model to use for refolding (default: af2)")
+    parser.add_argument("--protenix_model", type=str, default="protenix-v2",
+                        help="Protenix model name (default: protenix-v2)")
+    parser.add_argument("--target_msa", type=str, default=None,
+                        help="Optional path to pre-computed target MSA (.a3m) for Chain A")
+    parser.add_argument("--msa_db", type=str, default=None,
+                        help="Path to MSA database directory for auto-generating target MSAs")
     
     args = parser.parse_args()
     
@@ -701,7 +713,7 @@ def main():
     if args.settings:
         settings_path = Path(args.settings)
         if not settings_path.is_absolute():
-            repo_root = Path(__file__).parent.parent.parent
+            repo_root = Path(__file__).parent.parent
             settings_path = repo_root / settings_path
         if settings_path.exists():
             settings = load_settings(settings_path)
@@ -885,7 +897,11 @@ def main():
                     metric=metric,
                     output_dir=output_dir,
                     target_hotspot_residues=target_hotspot_residues,
-                    target_blacklist_residues=target_blacklist_residues
+                    target_blacklist_residues=target_blacklist_residues,
+                    folding_model=args.folding_model,
+                    protenix_model_name=args.protenix_model,
+                    target_msa=args.target_msa,
+                    msa_db_path=args.msa_db,
                 )
             except Exception as e:
                 logger.error(f"Lineage {lineage.lineage_id} failed: {e}")

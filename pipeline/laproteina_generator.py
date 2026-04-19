@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 if "DATA_PATH" not in os.environ:
     os.environ["DATA_PATH"] = "."
 
+# Add laproteina directory to sys.path to allow importing proteinfoundation
+_laproteina_path = str(Path(__file__).resolve().parent.parent / "laproteina")
+if _laproteina_path not in sys.path:
+    sys.path.append(_laproteina_path)
+
 import torch
 import lightning as L
 from torch.utils.data import DataLoader
@@ -154,8 +159,8 @@ class LaProteinaGenerator:
         if base_config_path:
             self._config_dir = Path(base_config_path)
         else:
-            # Default: assume configs are in ../configs relative to proteinfoundation
-            self._config_dir = Path(__file__).parent.parent / "configs"
+            # Default: assume configs are in laproteina/configs
+            self._config_dir = Path(__file__).parent.parent / "laproteina" / "configs"
         
         # Validate paths
         if not self.checkpoint_path.exists():

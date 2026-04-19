@@ -26,6 +26,7 @@ venv/
 laproteina/checkpoints/
 checkpoints_laproteina/
 params/
+data/
 
 # Data and outputs
 processed/
@@ -39,7 +40,10 @@ lightning_logs/
 
 # Checkpoint temp dir (avoids cross-device link on NFS)
 laproteina/.tmp/
+laproteina/tmp/
+laproteina/wandb/
 
 # IDE files
 .vscode/
 .idea/
+*.code-workspace

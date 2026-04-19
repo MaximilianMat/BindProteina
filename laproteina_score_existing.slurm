@@ -153,4 +153,4 @@ for ((i=0; i<${#ARGS[@]}; i++)); do
   fi
 done
 
-python -u laproteina/proteinfoundation/score_existing_two_step.py "${FINAL_ARGS[@]}"
+python -u pipeline/score_existing_two_step.py "${FINAL_ARGS[@]}"
