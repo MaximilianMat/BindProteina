@@ -145,6 +145,9 @@ def _pick_filter_spec(
 
 
 def main():
+    import time
+    pipeline_start_time = time.time()
+    
     # Set matmul precision for performance on Tensor Cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
@@ -589,7 +592,15 @@ def main():
     logger.info("Initial Generation Pipeline Complete")
     logger.info("=" * 60)
     
+    pipeline_end_time = time.time()
+    total_elapsed = pipeline_end_time - pipeline_start_time
+    hours, rem = divmod(total_elapsed, 3600)
+    minutes, seconds = divmod(rem, 60)
+    logger.info(f"Total Pipeline Runtime: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f} "
+                f"({total_elapsed:.2f} seconds)")
+
     summary = {
+        "pipeline_runtime_seconds": total_elapsed,
         "target_pdb": target_pdb,
         "n_linker_starting_points": n_linker_starting_points,
         "direct_binder_mode": direct_binder_mode,

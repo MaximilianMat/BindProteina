@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import time
 import numpy as np
 import torch
 import pandas as pd
@@ -48,6 +49,8 @@ def score_complexes(
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("medium")
 
+    start_time_total = time.time()
+
     input_path = Path(input_dir)
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -67,6 +70,7 @@ def score_complexes(
 
     # ── Auto-generate Target MSA if needed ───────────────────────────
     if folding_model == "protenix" and target_msa is None and msa_db_path:
+        start_time_msa = time.time()
         from pipeline.scoring.folding_protenix import auto_generate_msa
         print(f"Auto-generating target MSA using DB: {msa_db_path}")
         try:
@@ -78,8 +82,10 @@ def score_complexes(
             print(f"Target MSA generated at: {target_msa}")
         except Exception as e:
             print(f"WARNING: Automated MSA search failed: {e}. Proceeding without MSA.")
+        elapsed_msa = time.time() - start_time_msa
 
     # ── Stage 1: Folding ─────────────────────────────────────────────
+    start_time_folding = time.time()
     predictions_dir = out_path / f"{folding_model}_predictions"
     predictions_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,6 +173,8 @@ def score_complexes(
     folding_df.to_csv(folding_csv, index=False)
     print(f"Saved {folding_model} pre-scoring to {folding_csv}")
 
+    elapsed_folding = time.time() - start_time_folding
+
     # ── Filter ────────────────────────────────────────────────────────
     # Map from our internal metric name -> filter JSON suffix
     metric_to_suffix = {
@@ -235,9 +243,17 @@ def score_complexes(
 
     if not passing:
         print("No folding-passing designs; stopping before PyRosetta.")
+        elapsed_total = time.time() - start_time_total
+        print("\n=== Scoring Timing Summary ===")
+        if 'elapsed_msa' in locals():
+            print(f"MSA Generation:   {elapsed_msa:.2f}s")
+        print(f"Folding Stage:    {elapsed_folding:.2f}s")
+        print(f"Total Time:       {elapsed_total:.2f}s")
+        print("==============================\n")
         return
 
     # ── Stage 2: PyRosetta Scoring (only passing designs) ─────────────
+    start_time_pyrosetta = time.time()
     if dalphaball_path is None:
         repo_root = Path(__file__).resolve().parent.parent.parent
         dalphaball_path = str(repo_root / "functions" / "DAlphaBall.gcc")
@@ -337,6 +353,17 @@ def score_complexes(
                 n_fail = (final_df[col] == "FAIL").sum()
                 print(f"  {metric}: {(n_fail/total_pyrosetta)*100:.1f}%")
         print("-----------------------------------\n")
+
+    elapsed_pyrosetta = time.time() - start_time_pyrosetta
+    elapsed_total = time.time() - start_time_total
+
+    print("\n=== Scoring Timing Summary ===")
+    if 'elapsed_msa' in locals():
+        print(f"MSA Generation:   {elapsed_msa:.2f}s")
+    print(f"Folding Stage:    {elapsed_folding:.2f}s")
+    print(f"PyRosetta Stage:  {elapsed_pyrosetta:.2f}s")
+    print(f"Total Time:       {elapsed_total:.2f}s")
+    print("==============================\n")
 
     print(f"Saved final scoring summary to {summary_csv}")
 

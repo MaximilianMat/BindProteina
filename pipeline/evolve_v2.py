@@ -662,6 +662,9 @@ def evolve_lineage_single_round(
 
 
 def main():
+    import time
+    pipeline_start_time = time.time()
+    
     # Set matmul precision for performance on Tensor Cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
@@ -958,6 +961,13 @@ def main():
     logger.info(f"\nResults saved to: {output_dir}")
     logger.info(f"Final summary: {output_dir / 'final_summary.csv'}")
     logger.info(f"Top PDBs: {final_dir}")
+
+    pipeline_end_time = time.time()
+    total_elapsed = pipeline_end_time - pipeline_start_time
+    hours, rem = divmod(total_elapsed, 3600)
+    minutes, seconds = divmod(rem, 60)
+    logger.info(f"\nTotal Pipeline Runtime: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f} "
+                f"({total_elapsed:.2f} seconds)")
 
 
 if __name__ == "__main__":
