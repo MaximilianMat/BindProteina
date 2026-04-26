@@ -393,6 +393,7 @@ def evolve_lineage_single_round(
     protenix_model_name: str = "protenix-v2",
     target_msa: Optional[str] = None,
     msa_db_path: Optional[str] = None,
+    target_template: Optional[str] = None,
 ) -> Lineage:
     """
     Evolve a single lineage for one round.
@@ -508,6 +509,7 @@ def evolve_lineage_single_round(
             protenix_model_name=protenix_model_name,
             target_msa=target_msa,
             msa_db_path=msa_db_path,
+            target_template=target_template,
         )
     except Exception as e:
         logger.error(f"  Scoring failed: {e}")
@@ -700,14 +702,17 @@ def main():
     parser.add_argument("--target_blacklist_residues", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoints")
-    parser.add_argument("--folding_model", type=str, default="af2", choices=["af2", "protenix"],
-                        help="Folding model to use for refolding (default: af2)")
-    parser.add_argument("--protenix_model", type=str, default="protenix-v2",
-                        help="Protenix model name (default: protenix-v2)")
+    parser.add_argument("--folding_model", type=str, default=None,
+                        help="Folding model to use for refolding (af2 or protenix)")
+    parser.add_argument("--protenix_model", type=str, default=None,
+                        help="Protenix model name")
     parser.add_argument("--target_msa", type=str, default=None,
-                        help="Optional path to pre-computed target MSA (.a3m) for Chain A")
+                        help="Optional path to pre-computed target MSA (.a3m file or directory) for Chain A")
     parser.add_argument("--msa_db", type=str, default=None,
                         help="Path to MSA database directory for auto-generating target MSAs")
+    parser.add_argument("--target_template", type=str, default=None,
+                        help="Optional path to structural template for target Chain A (.pdb/.cif runs "
+                             "protenix mt online; .a3m/.hhr used directly). Enables --use_template true.")
     
     args = parser.parse_args()
     
@@ -764,6 +769,12 @@ def main():
     target_blacklist_residues = get_arg("target_blacklist_residues", args.target_blacklist_residues)
     device = get_arg("device", args.device, "cuda")
     
+    folding_model = get_arg("folding_model", args.folding_model, "af2")
+    protenix_model = get_arg("protenix_model", args.protenix_model, "protenix-v2")
+    target_msa = get_arg("target_msa", args.target_msa)
+    msa_db = get_arg("msa_db", args.msa_db)
+    target_template = get_arg("target_template", args.target_template)
+
     # Fix paths
     if input_csv:
         input_csv = fix_path(input_csv)
@@ -775,6 +786,12 @@ def main():
         autoencoder_path = fix_path(autoencoder_path)
     target_pdb = fix_path(target_pdb)
     checkpoint_path = fix_path(checkpoint_path)
+    if target_msa:
+        target_msa = fix_path(target_msa)
+    if msa_db:
+        msa_db = fix_path(msa_db)
+    if target_template:
+        target_template = fix_path(target_template)
     
     # Create output directory
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
@@ -901,10 +918,11 @@ def main():
                     output_dir=output_dir,
                     target_hotspot_residues=target_hotspot_residues,
                     target_blacklist_residues=target_blacklist_residues,
-                    folding_model=args.folding_model,
-                    protenix_model_name=args.protenix_model,
-                    target_msa=args.target_msa,
-                    msa_db_path=args.msa_db,
+                    folding_model=folding_model,
+                    protenix_model_name=protenix_model,
+                    target_msa=target_msa,
+                    msa_db_path=msa_db,
+                    target_template=target_template,
                 )
             except Exception as e:
                 logger.error(f"Lineage {lineage.lineage_id} failed: {e}")

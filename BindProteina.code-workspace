@@ -8,7 +8,15 @@
 		},
 		{
 			"path": "../../../../../../Documents/repos/la-proteina-2"
+		},
+		{
+			"path": "../../../../../../Documents/repos/Protenix"
+		},
+		{
+			"path": "../Proteina-Complexa"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
 }

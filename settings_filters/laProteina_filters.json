@@ -1316,27 +1316,27 @@
         "higher": false
     },
     "Average_Binder_RMSD": {
-        "threshold": 3.5,
+        "threshold": 4.5,
         "higher": false
     },
     "1_Binder_RMSD": {
-        "threshold": 3.5,
+        "threshold": 4.5,
         "higher": false
     },
     "2_Binder_RMSD": {
-        "threshold": 3.5,
+        "threshold": 4.5,
         "higher": false
     },
     "3_Binder_RMSD": {
-        "threshold": 3.5,
+        "threshold": 4.5,
         "higher": false
     },
     "4_Binder_RMSD": {
-        "threshold": 3.5,
+        "threshold": 4.5,
         "higher": false
     },
     "5_Binder_RMSD": {
-        "threshold": 3.5,
+        "threshold": 4.5,
         "higher": false
     }
 }

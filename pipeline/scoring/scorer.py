@@ -29,6 +29,7 @@ def score_complexes(
     protenix_model_name: str = "protenix-v2",
     target_msa: Optional[str] = None,
     msa_db_path: Optional[str] = None,
+    target_template: Optional[str] = None,
 ):
     """
     Universal 2-stage scoring orchestrator.
@@ -44,7 +45,14 @@ def score_complexes(
         dalphaball_path: Path to DAlphaBall executable for PyRosetta.
         folding_model: Which folding model to use: "af2" or "protenix".
         protenix_model_name: Protenix model name (only used when folding_model="protenix").
-        target_msa: Optional path to a pre-computed MSA (.a3m) for the target protein (Chain A).
+        target_msa: Optional path to a pre-computed MSA directory (containing pairing.a3m +
+            non_pairing.a3m) for the target protein (Chain A).  A single .a3m file is also
+            accepted for backward compatibility.
+        target_template: Optional path to a structural template for the target chain.
+            Accepts: a .a3m or .hhr file (used directly as templatesPath), or a PDB/CIF
+            file (Chain A sequence is extracted and protenix mt is run online to find
+            matching PDB templates).  When provided, --use_template true is passed to
+            protenix pred, which biases the target conformation towards the known structure.
     """
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("medium")
@@ -68,21 +76,75 @@ def score_complexes(
         print(f"No PDBs found in {input_path}")
         return
 
-    # ── Auto-generate Target MSA if needed ───────────────────────────
-    if folding_model == "protenix" and target_msa is None and msa_db_path:
+    # ── Resolve / generate Target MSA directory ──────────────────────
+    if folding_model == "protenix":
+        from pipeline.scoring.folding_protenix import generate_target_msa_dir
+        import shutil as _shutil
+        msa_out_dir = out_path / "target_msa"
         start_time_msa = time.time()
-        from pipeline.scoring.folding_protenix import auto_generate_msa
-        print(f"Auto-generating target MSA using DB: {msa_db_path}")
         try:
-            target_msa = auto_generate_msa(
-                pdb_path=str(pdbs[0]),
-                output_dir=out_path / "target_msa",
-                db_path=msa_db_path
-            )
-            print(f"Target MSA generated at: {target_msa}")
+            if target_msa and Path(target_msa).is_file():
+                # User supplied a custom non-pairing .a3m:
+                # 1. Generate the MSA directory online to obtain pairing.a3m
+                # 2. Override the generated non_pairing.a3m with the supplied file
+                from pipeline.scoring.utils import extract_sequence_from_pdb
+                target_seq = "".join(
+                    c for c in extract_sequence_from_pdb(str(pdbs[0]), "A").upper()
+                    if "A" <= c <= "Z"
+                )
+                supplied_a3m = Path(target_msa).absolute()
+                print(f"Generating target pairing MSA; will override non_pairing.a3m with: {supplied_a3m.name}")
+                target_msa = generate_target_msa_dir(target_seq=target_seq, output_dir=msa_out_dir)
+                non_pairing_dst = Path(target_msa) / "non_pairing.a3m"
+                if non_pairing_dst.exists():
+                    non_pairing_dst.unlink()
+                _shutil.copy2(supplied_a3m, non_pairing_dst)
+                print(f"  Overrode non_pairing.a3m with supplied file.")
+            elif target_msa and Path(target_msa).is_dir():
+                pass  # already the right format; use as-is
+            else:
+                # Nothing supplied — generate via the Protenix online MSA server
+                from pipeline.scoring.utils import extract_sequence_from_pdb
+                target_seq = "".join(
+                    c for c in extract_sequence_from_pdb(str(pdbs[0]), "A").upper()
+                    if "A" <= c <= "Z"
+                )
+                print("Auto-generating target MSA (protenix online server)...")
+                target_msa = generate_target_msa_dir(
+                    target_seq=target_seq,
+                    output_dir=msa_out_dir,
+                )
+            elapsed_msa = time.time() - start_time_msa
+            print(f"Target MSA directory: {target_msa} ({elapsed_msa:.1f}s)")
         except Exception as e:
-            print(f"WARNING: Automated MSA search failed: {e}. Proceeding without MSA.")
-        elapsed_msa = time.time() - start_time_msa
+            print(f"WARNING: MSA setup failed: {e}. Proceeding without MSA.")
+            target_msa = None
+
+    # ── Resolve / generate template if a PDB/CIF was supplied ────────
+    resolved_template: Optional[str] = target_template
+    if folding_model == "protenix" and target_template:
+        tp = Path(target_template)
+        if tp.suffix.lower() in (".pdb", ".cif", ".mmcif"):
+            from pipeline.scoring.folding_protenix import prepare_template_from_pdb
+            print(f"Generating structural templates from: {target_template}")
+            start_tpl = time.time()
+            try:
+                # prepare_template_from_pdb runs protenix mt online and returns
+                # (msa_dir, template_a3m_path).  We take the template file;
+                # if MSA was not yet generated we also use the resulting msa_dir.
+                msa_dir, tpl_file = prepare_template_from_pdb(
+                    pdb_or_cif_path=target_template,
+                    output_dir=out_path / "target_template",
+                )
+                resolved_template = tpl_file
+                if target_msa is None and msa_dir:
+                    target_msa = msa_dir
+                    print(f"Also using MSA from template search: {msa_dir}")
+                print(f"Template file: {tpl_file} ({time.time()-start_tpl:.1f}s)")
+            except Exception as e:
+                print(f"WARNING: Template generation failed: {e}. Proceeding without template.")
+                resolved_template = None
+        # .a3m / .hhr files are passed through unchanged
 
     # ── Stage 1: Folding ─────────────────────────────────────────────
     start_time_folding = time.time()
@@ -146,6 +208,7 @@ def score_complexes(
                 output_dir=predictions_dir,
                 model_name=protenix_model_name,
                 target_msa_path=target_msa,
+                target_template_path=resolved_template,
             )
             
             for design_name, folded_pdb, metrics in batch_results:

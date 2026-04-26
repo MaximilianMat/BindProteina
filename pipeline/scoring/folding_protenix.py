@@ -4,37 +4,128 @@ Protenix folding adapter.
 Runs Protenix structure prediction via its CLI (`protenix pred`),
 then converts the CIF output to PDB and extracts confidence metrics
 so that the downstream scoring pipeline sees the same interface as AF2.
+
+MSA workflow
+------------
+Generate the target MSA once with `generate_target_msa_dir()`, which calls
+`protenix msa --msa_server_mode protenix` and returns the directory that
+contains `pairing.a3m` + `non_pairing.a3m`.  Pass that directory as
+`target_msa_path` to the folding functions; it is wired into the
+`pairedMsaPath` / `unpairedMsaPath` fields of the target chain entry.
+
+`--use_msa false` is always passed to `protenix pred` so that no per-sample
+MSA search is triggered (the binder is a de novo design with no MSA, and
+the target MSA is already embedded in the JSON).
 """
 
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 from loguru import logger
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_protenix_cmd() -> str:
+    """Return the protenix binary path, preferring the protenix_env conda env."""
+    try:
+        conda_base = subprocess.check_output(["conda", "info", "--base"], text=True).strip()
+        protenix_bin = os.path.join(conda_base, "envs", "protenix_env", "bin", "protenix")
+        if os.path.exists(protenix_bin):
+            return protenix_bin
+    except Exception:
+        pass
+    return "protenix"
+
+
+def _attach_msa_to_chain(chain: dict, target_msa_path: Optional[str]) -> None:
+    """
+    Attach precomputed MSA to a proteinChain dict in-place.
+
+    Accepts either:
+    - a directory containing pairing.a3m + non_pairing.a3m
+      → sets pairedMsaPath / unpairedMsaPath directly (Protenix modern format)
+    - a single .a3m file (backward-compat)
+      → sets BOTH pairedMsaPath and unpairedMsaPath to the same file.
+        This prevents Protenix from searching for a paired MSA when --use_msa true is set.
+    """
+    if not target_msa_path:
+        return
+    p = Path(target_msa_path)
+    if p.is_dir():
+        paired = p / "pairing.a3m"
+        unpaired = p / "non_pairing.a3m"
+        if paired.exists():
+            chain["pairedMsaPath"] = str(paired)
+        if unpaired.exists():
+            chain["unpairedMsaPath"] = str(unpaired)
+        if not paired.exists() and not unpaired.exists():
+            logger.warning(f"MSA directory found but contains no pairing.a3m or non_pairing.a3m: {p}")
+    elif p.is_file():
+        # Set both to avoid trigger search for paired
+        chain["unpairedMsaPath"] = str(p)
+        chain["pairedMsaPath"] = str(p)
+    else:
+        logger.warning(f"Target MSA path provided but NOT FOUND: {p}")
+
+
+def _write_minimal_binder_a3m(binder_seq: str, out_dir: Path) -> str:
+    """
+    Write a minimal single-sequence a3m for a de novo binder and return the path.
+
+    Format matches Protenix's own output for sequences with no homologs found:
+    two lines — ">query" header, then the bare uppercase sequence.
+    The same file is used for both pairedMsaPath and unpairedMsaPath.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    a3m_path = out_dir / "binder.a3m"
+    if not a3m_path.exists():
+        a3m_path.write_text(f">query\n{binder_seq}\n")
+    return str(a3m_path)
+
+
 def _build_protenix_input_json(
-    target_seq: str, binder_seq: str, job_name: str, out_path: Path, target_msa_path: Optional[str] = None
+    target_seq: str,
+    binder_seq: str,
+    job_name: str,
+    out_path: Path,
+    target_msa_path: Optional[str] = None,
+    target_template_path: Optional[str] = None,
+    binder_msa_path: Optional[str] = None,
 ) -> str:
-    """
-    Build a Protenix input JSON with two protein chains.
-    If target_msa_path is provided, it is linked to the target chain.
-    """
-    target_entry = {"proteinChain": {"count": 1, "sequence": target_seq, "modifications": []}}
-    if target_msa_path and os.path.exists(target_msa_path):
-        # Protenix v2 uses these specifically
-        target_entry["proteinChain"]["unpairedMsaPath"] = str(Path(target_msa_path).absolute())
-        # We can also add an empty pairedMsaPath if needed, but omitting it is usually fine
+    """Build a Protenix input JSON with two protein chains."""
+    target_chain: dict = {"count": 1, "sequence": target_seq, "modifications": []}
+    if target_msa_path:
+        from pipeline.generate import fix_path
+        resolved = Path(fix_path(target_msa_path)).absolute()
+        _attach_msa_to_chain(target_chain, str(resolved))
+        if "pairedMsaPath" in target_chain or "unpairedMsaPath" in target_chain or "msa" in target_chain:
+            logger.info(f"Using pre-computed target MSA: {resolved}")
+
+    if target_template_path:
+        tp = Path(target_template_path).absolute()
+        if tp.exists():
+            target_chain["templatesPath"] = str(tp)
+            logger.info(f"Using template: {tp}")
+        else:
+            logger.warning(f"Template path provided but NOT FOUND: {tp}")
+
+    binder_chain: dict = {"count": 1, "sequence": binder_seq, "modifications": []}
+    if binder_msa_path:
+        binder_chain["unpairedMsaPath"] = binder_msa_path
+        binder_chain["pairedMsaPath"] = binder_msa_path
 
     payload = [
         {
             "name": job_name,
             "covalent_bonds": [],
             "sequences": [
-                target_entry,
-                {"proteinChain": {"count": 1, "sequence": binder_seq, "modifications": []}},
+                {"proteinChain": target_chain},
+                {"proteinChain": binder_chain},
             ],
         }
     ]
@@ -51,11 +142,8 @@ def _cif_to_pdb(cif_path: str, pdb_path: str) -> str:
     import biotite.structure as struc
 
     pdbx_file = pdbx.CIFFile.read(cif_path)
-    # Take the first block
     block = list(pdbx_file.values())[0]
     atoms = pdbx.get_structure(block, model=1)
-
-    # Filter to standard amino acid atoms only
     atoms = atoms[struc.filter_amino_acids(atoms)]
 
     pdb_file = pdb_io.PDBFile()
@@ -64,42 +152,112 @@ def _cif_to_pdb(cif_path: str, pdb_path: str) -> str:
     return pdb_path
 
 
-def _parse_protenix_confidence(json_path: str) -> Dict[str, Any]:
+def _pick_best_sample(
+    search_dir: Path,
+    design_name: Optional[str] = None,
+) -> Tuple[Optional[Path], dict]:
     """
-    Parse the Protenix summary_confidence JSON and return metrics
-    in a format compatible with the AF2 metrics dict.
-    """
-    with open(json_path, "r") as f:
-        data = json.load(f)
+    Scan *search_dir* for summary_confidence JSON files, pick the one with the
+    highest ranking_score, and return (best_cif_path, confidence_data).
 
-    # Protenix outputs: plddt, ptm, iptm, ranking_score, chain_plddt, etc.
-    metrics = {
-        "pLDDT": round(float(data.get("plddt", 0.0)), 3),
-        "pTM": round(float(data.get("ptm", 0.0)), 3),
-        "i_pTM": round(float(data.get("iptm", 0.0)), 3),
-        "ranking_score": round(float(data.get("ranking_score", 0.0)), 3),
-        "has_clash": data.get("has_clash", None),
+    If *design_name* is given, only files whose name starts with
+    ``{design_name}_summary_confidence`` or whose parent dir matches the name
+    are considered.
+    """
+    if design_name:
+        conf_files = [
+            cf for cf in search_dir.rglob("*_summary_confidence_sample_*.json")
+            if cf.name.startswith(f"{design_name}_summary_confidence")
+            or cf.parent.name == design_name
+        ]
+    else:
+        conf_files = list(search_dir.rglob("*_summary_confidence_sample_*.json"))
+
+    best_cif: Optional[Path] = None
+    best_data: dict = {}
+
+    if conf_files:
+        ranked = []
+        for cf in conf_files:
+            try:
+                with open(cf) as fh:
+                    data = json.load(fh)
+                score = data.get("ranking_score", data.get("iptm", 0.0))
+                ranked.append((cf, score, data))
+            except Exception:
+                continue
+
+        if ranked:
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            best_conf_file, _, best_data = ranked[0]
+            # Derive CIF path: {name}_summary_confidence_sample_N.json → {name}_sample_N.cif
+            cif_name = best_conf_file.name.replace("_summary_confidence_", "_").replace(".json", ".cif")
+            potential_cif = best_conf_file.parent / cif_name
+            if potential_cif.exists():
+                best_cif = potential_cif
+
+    if best_cif is None:
+        # Fallback to any matching CIF
+        if design_name:
+            cifs = [
+                c for c in search_dir.rglob("*.cif")
+                if c.name.startswith(f"{design_name}_") or c.parent.name == design_name
+            ]
+        else:
+            cifs = list(search_dir.rglob("*.cif"))
+        if cifs:
+            best_cif = cifs[0]
+
+    return best_cif, best_data
+
+
+def _build_metrics_dict(
+    best_data: dict,
+    binder_seq: str,
+    binder_len: int,
+    model_name: str,
+) -> dict:
+    """Build the standardised metrics dict from a Protenix confidence JSON."""
+    plddt = best_data.get("plddt", 0.0)
+    if plddt < 1.0:
+        plddt *= 100.0
+
+    chain_plddt = best_data.get("chain_plddt") or []
+    binder_plddt = chain_plddt[1] * 100.0 if len(chain_plddt) > 1 else plddt
+
+    chain_iptm = best_data.get("chain_iptm") or []
+    binder_iptm = chain_iptm[1] if len(chain_iptm) > 1 else None
+
+    chain_pair_iptm = best_data.get("chain_pair_iptm") or []
+    cross_iptm = (
+        chain_pair_iptm[0][1]
+        if (len(chain_pair_iptm) > 0 and len(chain_pair_iptm[0]) > 1)
+        else None
+    )
+
+    return {
+        "pLDDT":           plddt,
+        "binder_pLDDT":    binder_plddt,
+        "pTM":             best_data.get("ptm", 0.0),
+        "i_pTM":           best_data.get("iptm", 0.0),
+        "ranking_score":   best_data.get("ranking_score", 0.0),
+        "gpde":            best_data.get("gpde"),
+        "binder_iptm":     binder_iptm,
+        "chain_pair_iptm": cross_iptm,
+        "has_clash":       best_data.get("has_clash"),
+        "disorder":        best_data.get("disorder"),
+        "num_recycles":    best_data.get("num_recycles"),
+        "pAE":             None,   # not available from Protenix
+        "i_pAE":           None,
+        "sequence":        binder_seq,
+        "binder_length":   binder_len,
+        "folding_model":   model_name,
     }
 
-    # Extract per-chain pLDDT for binder (chain index 1 = entity 2)
-    chain_plddt = data.get("chain_plddt")
-    if chain_plddt and len(chain_plddt) >= 2:
-        metrics["binder_pLDDT"] = round(float(chain_plddt[1]), 3)
-    else:
-        metrics["binder_pLDDT"] = None
 
-    # Extract per-chain pTM
-    chain_ptm = data.get("chain_ptm")
-    if chain_ptm and len(chain_ptm) >= 2:
-        metrics["binder_pTM"] = round(float(chain_ptm[1]), 3)
-
-    # ipTM between chains (target-binder)
-    chain_pair_iptm = data.get("chain_pair_iptm")
-    if chain_pair_iptm and len(chain_pair_iptm) >= 2 and len(chain_pair_iptm[0]) >= 2:
-        metrics["chain_pair_i_pTM"] = round(float(chain_pair_iptm[0][1]), 3)
-
-    return metrics
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def run_protenix_refolding(
     pdb_path: str,
@@ -108,15 +266,10 @@ def run_protenix_refolding(
     model_name: str = "protenix-v2",
     seed: int = 42,
     target_msa_path: Optional[str] = None,
+    target_template_path: Optional[str] = None,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """
-    Run Protenix structure prediction on a complex PDB.
-
-    1. Extract target (chain A) and binder (chain B) sequences from the input PDB.
-    2. Build a Protenix input JSON.
-    3. Run `protenix pred` via subprocess.
-    4. Convert the CIF output to PDB.
-    5. Parse confidence metrics.
+    Run Protenix structure prediction on a single complex PDB.
 
     Returns: (path_to_protenix_pdb, metrics_dict)
     """
@@ -130,60 +283,42 @@ def run_protenix_refolding(
     if not target_seq:
         return None, {"error": "No target sequence found (Chain A missing?)"}
 
-    binder_seq = "".join([c for c in binder_seq.upper() if "A" <= c <= "Z"])
-    target_seq = "".join([c for c in target_seq.upper() if "A" <= c <= "Z"])
+    binder_seq = "".join(c for c in binder_seq.upper() if "A" <= c <= "Z")
+    target_seq = "".join(c for c in target_seq.upper() if "A" <= c <= "Z")
     binder_len = len(binder_seq)
 
     if binder_len == 0:
         return None, {"error": "Empty binder sequence"}
 
-    # Create a working directory for this design
     work_dir = output_dir / f"{design_name}_protenix"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build input JSON
+    binder_msa = _write_minimal_binder_a3m(binder_seq, work_dir / "binder_msa")
+
     input_json = _build_protenix_input_json(
         target_seq=target_seq,
         binder_seq=binder_seq,
         job_name=design_name,
         out_path=work_dir,
         target_msa_path=target_msa_path,
+        target_template_path=target_template_path,
+        binder_msa_path=binder_msa,
     )
 
-    import sys
-
-    # Resolve protenix command.
-    # We prefer the 'protenix_env' if it exists to avoid NumPy version conflicts.
-    protenix_cmd = "protenix"
-    try:
-        conda_base = subprocess.check_output(["conda", "info", "--base"], text=True).strip()
-        protenix_bin = os.path.join(conda_base, "envs", "protenix_env", "bin", "protenix")
-        if os.path.exists(protenix_bin):
-            protenix_cmd = protenix_bin
-    except Exception:
-        pass
-
-    # Run protenix pred
-    # We only disable msa/template if a target_msa is NOT provided. 
-    # If a target_msa is provided, we let protenix use the linked file.
-    use_msa_flag = "false" if not target_msa_path else "true"
-
+    protenix_cmd = _resolve_protenix_cmd()
+    use_template_flag = "true" if target_template_path else "false"
     cmd = [
         protenix_cmd, "pred",
         "-i", input_json,
         "-o", str(work_dir),
         "-n", model_name,
         "--seeds", str(seed),
-        "--use_msa", use_msa_flag,
-        "--use_template", "false",
+        "--use_msa", "true",       # precomputed MSA in JSON; suppress per-sample MSA search
+        "--use_template", use_template_flag,
+        "--enable_cache", "true",
     ]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10 min timeout per design
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             return None, {"error": f"Protenix failed: {result.stderr[:500]}"}
     except subprocess.TimeoutExpired:
@@ -191,84 +326,17 @@ def run_protenix_refolding(
     except FileNotFoundError:
         return None, {"error": "protenix CLI not found. Is protenix installed?"}
 
-    # 4. Locate the best output CIF and confidence JSON
-    conf_files = list(work_dir.rglob("*_summary_confidence_sample_*.json"))
-    
-    best_cif = None
-    best_scores = {"plddt": 0.0, "ptm": 0.0, "iptm": 0.0}
-    best_data = {}  # Initialize in case no conf files found
-    
-    if conf_files:
-        # Load all confidence scores
-        sample_confidences = []
-        for cf in conf_files:
-            try:
-                with open(cf, 'r') as f:
-                    data = json.load(f)
-                    # Higher is better
-                    score = data.get("ranking_score", data.get("iptm", 0.0))
-                    sample_confidences.append((cf, score, data))
-            except Exception:
-                continue
-        
-        if sample_confidences:
-            # Pick the best sample based on ranking_score
-            sample_confidences.sort(key=lambda x: x[1], reverse=True)
-            best_conf_file, _, best_data = sample_confidences[0]
-            
-            # Map back to CIF: {name}_summary_confidence_sample_{N}.json -> {name}_sample_{N}.cif
-            sample_suffix = best_conf_file.name.replace("_summary_confidence_", "_").replace(".json", ".cif")
-            potential_cif = best_conf_file.parent / sample_suffix
-            if potential_cif.exists():
-                best_cif = potential_cif
-            
-            best_scores = {
-                "plddt": best_data.get("plddt", 0.0),
-                "ptm": best_data.get("ptm", 0.0),
-                "iptm": best_data.get("iptm", 0.0)
-            }
-            
-    if not best_cif:
-        # Fallback to any cif if JSON failed
-        cif_files = list(work_dir.rglob("*.cif"))
-        if not cif_files:
-            return None, {"error": f"No Protenix output (.cif) found in {work_dir}"}
-        best_cif = cif_files[0]
+    best_cif, best_data = _pick_best_sample(work_dir)
+    if best_cif is None:
+        return None, {"error": f"No Protenix output (.cif) found in {work_dir}"}
 
-    # Convert CIF to PDB for visual check/other tools
     protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
     try:
         _cif_to_pdb(str(best_cif), protenix_pdb_path)
-    except Exception as e:
-        # Not fatal, but worth noting
+    except Exception:
         pass
 
-    # Build the metrics dictionary expected by scorer.py
-    # Standardize keys to match AF2 output in scorer.py
-    plddt_val = best_scores["plddt"]
-    # Ensure plddt is on 0-100 scale (protenix global plddt is already, but just in case)
-    if plddt_val < 1.0:
-        plddt_val *= 100.0
-        
-    # Extract binder pLDDT if available (usually chain 1 in Protenix if A=target, B=binder)
-    binder_plddt = plddt_val # fallback
-    if "chain_plddt" in best_data and len(best_data["chain_plddt"]) > 1:
-        # protenix chain_plddt seems to be 0-1 scale in JSON? 
-        # let's check: [0.92, 0.74] -> yes.
-        binder_plddt = best_data["chain_plddt"][1] * 100.0
-
-    metrics = {
-        "pLDDT": plddt_val,
-        "binder_pLDDT": binder_plddt,
-        "pTM": best_data.get("ptm", 0.0),
-        "i_pTM": best_data.get("iptm", 0.0),
-        "pAE": None,   # For compatibility
-        "i_pAE": None, # For compatibility
-        "sequence": binder_seq,
-        "binder_length": binder_len,
-        "folding_model": model_name,
-    }
-
+    metrics = _build_metrics_dict(best_data, binder_seq, binder_len, model_name)
     return protenix_pdb_path, metrics
 
 
@@ -278,18 +346,56 @@ def run_protenix_refolding_batch(
     model_name: str = "protenix-v2",
     seed: int = 42,
     target_msa_path: Optional[str] = None,
+    target_template_path: Optional[str] = None,
+    chunk_size: int = 40,
 ) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
     """
-    Run Protenix structure prediction on multiple complex PDBs in a single batch.
+    Run Protenix structure prediction on multiple complex PDBs using chunked batches.
+
+    Protenix can struggle with very large input JSONs due to preprocessing overhead.
+    This function splits work into chunks of *chunk_size* designs and runs a separate
+    `protenix pred` subprocess per chunk while showing a live progress bar.
+
     Returns: List of (design_name, path_to_protenix_pdb, metrics_dict)
     """
+    import time
+    from tqdm import tqdm
     from pipeline.scoring.utils import extract_sequence_from_pdb
-
-    payload = []
-    job_info = {}
 
     work_dir = output_dir / "protenix_batch"
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # -----------------------------------------------------------------------
+    # Resolve precomputed MSA + template paths once for all designs
+    # -----------------------------------------------------------------------
+    from pipeline.generate import fix_path
+
+    resolved_msa_path: Optional[str] = None
+    if target_msa_path:
+        msa_obj = Path(fix_path(target_msa_path)).absolute()
+        if msa_obj.exists():
+            resolved_msa_path = str(msa_obj)
+            logger.info(f"Using pre-computed target MSA: {resolved_msa_path}")
+        else:
+            logger.warning(f"Target MSA path provided but NOT FOUND: {msa_obj}")
+
+    resolved_template_path: Optional[str] = None
+    if target_template_path:
+        tpl_obj = Path(fix_path(target_template_path)).absolute()
+        if tpl_obj.exists():
+            resolved_template_path = str(tpl_obj)
+            logger.info(f"Using template: {resolved_template_path}")
+        else:
+            logger.warning(f"Template path provided but NOT FOUND: {tpl_obj}")
+
+    # -----------------------------------------------------------------------
+    # Build full payload (sequence extraction + MSA embedding)
+    # -----------------------------------------------------------------------
+    binder_msa_dir = work_dir / "binder_msas"
+    binder_msa_dir.mkdir(parents=True, exist_ok=True)
+
+    payload: list = []
+    job_info: dict = {}
 
     for pdb_path in pdb_paths:
         design_name = Path(pdb_path).stem
@@ -297,38 +403,51 @@ def run_protenix_refolding_batch(
         binder_seq = extract_sequence_from_pdb(pdb_path, "B")
 
         if not binder_seq:
-            job_info[design_name] = {"error": "No binder sequence found (Chain B missing?)", "seq": ""}
+            job_info[design_name] = {"error": "No binder sequence found (Chain B missing?)"}
             continue
         if not target_seq:
-            job_info[design_name] = {"error": "No target sequence found (Chain A missing?)", "seq": ""}
+            job_info[design_name] = {"error": "No target sequence found (Chain A missing?)"}
             continue
 
-        binder_seq = "".join([c for c in binder_seq.upper() if "A" <= c <= "Z"])
-        target_seq = "".join([c for c in target_seq.upper() if "A" <= c <= "Z"])
+        binder_seq = "".join(c for c in binder_seq.upper() if "A" <= c <= "Z")
+        target_seq = "".join(c for c in target_seq.upper() if "A" <= c <= "Z")
         binder_len = len(binder_seq)
 
         if binder_len == 0:
-            job_info[design_name] = {"error": "Empty binder sequence", "seq": ""}
+            job_info[design_name] = {"error": "Empty binder sequence"}
             continue
 
-        target_entry = {"proteinChain": {"count": 1, "sequence": target_seq, "modifications": []}}
-        if target_msa_path and os.path.exists(target_msa_path):
-            target_entry["proteinChain"]["unpairedMsaPath"] = str(Path(target_msa_path).absolute())
+        # Write minimal single-sequence MSA for the binder (both paired and unpaired).
+        # Format matches Protenix's own output for sequences with no homologs found:
+        # two lines per file — ">query" header then the bare sequence.
+        binder_a3m = binder_msa_dir / f"{design_name}_binder.a3m"
+        if not binder_a3m.exists():
+            binder_a3m.write_text(f">query\n{binder_seq}\n")
+
+        binder_chain: dict = {
+            "count": 1,
+            "sequence": binder_seq,
+            "modifications": [],
+            "unpairedMsaPath": str(binder_a3m),
+            "pairedMsaPath": str(binder_a3m),
+        }
+
+        target_chain: dict = {"count": 1, "sequence": target_seq, "modifications": []}
+        _attach_msa_to_chain(target_chain, resolved_msa_path)
+        if resolved_template_path:
+            target_chain["templatesPath"] = resolved_template_path
 
         payload.append({
             "name": design_name,
             "covalent_bonds": [],
             "sequences": [
-                target_entry,
-                {"proteinChain": {"count": 1, "sequence": binder_seq, "modifications": []}},
+                {"proteinChain": target_chain},
+                {"proteinChain": binder_chain},
             ],
         })
-        job_info[design_name] = {
-            "binder_seq": binder_seq,
-            "binder_len": binder_len
-        }
+        job_info[design_name] = {"binder_seq": binder_seq, "binder_len": binder_len}
 
-    results = []
+    results: list = []
     if not payload:
         for p in pdb_paths:
             dnn = Path(p).stem
@@ -336,248 +455,337 @@ def run_protenix_refolding_batch(
             results.append((dnn, None, {"error": err}))
         return results
 
-    json_path = work_dir / "batch_input.json"
-    with open(json_path, "w") as f:
+    # Save full payload for reference
+    with open(work_dir / "batch_input.json", "w") as f:
         json.dump(payload, f, indent=2)
 
-    protenix_cmd = "protenix"
-    try:
-        conda_base = subprocess.check_output(["conda", "info", "--base"], text=True).strip()
-        protenix_bin = os.path.join(conda_base, "envs", "protenix_env", "bin", "protenix")
-        if os.path.exists(protenix_bin):
-            protenix_cmd = protenix_bin
-    except Exception:
-        pass
+    protenix_cmd = _resolve_protenix_cmd()
 
-    use_msa_flag = "false" if not target_msa_path else "true"
-    cmd = [
-        protenix_cmd, "pred",
-        "-i", str(json_path),
-        "-o", str(work_dir),
-        "-n", model_name,
-        "--seeds", str(seed),
-        "--use_msa", use_msa_flag,
-        "--use_template", "false",
-    ]
+    # -----------------------------------------------------------------------
+    # Chunk + run
+    # -----------------------------------------------------------------------
+    n_chunks = (len(payload) + chunk_size - 1) // chunk_size
+    logger.info(
+        f"Protenix Batch: {len(payload)} designs → {n_chunks} chunk(s) of ≤{chunk_size}"
+    )
 
-    import time
-    from tqdm import tqdm
-    
-    try:
-        timeout_val = len(payload) * 600
-        logger.info(f"Running Protenix Batch with {len(payload)} designs")
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+    pbar = tqdm(total=len(payload), desc="Protenix Batch Prediction", unit="design")
+    global_start = time.time()
 
-        completed = set()
-        pbar = tqdm(total=len(payload), desc="Protenix Batch Prediction")
-        
-        start_time = time.time()
-        retcode = None
-        
-        while True:
-            retcode = process.poll()
-            
-            current_cifs = list(work_dir.rglob("*.cif"))
-            
-            new_completed = set()
-            for p in payload:
-                design_name = p["name"]
-                if design_name in completed:
-                    new_completed.add(design_name)
-                    continue
-                    
-                has_output = any(c.name.startswith(f"{design_name}_") or c.parent.name == design_name for c in current_cifs)
-                if has_output:
-                    new_completed.add(design_name)
-            
-            newly_done = len(new_completed) - len(completed)
-            if newly_done > 0:
-                pbar.update(newly_done)
-                completed = new_completed
-            
-            if retcode is not None:
-                break
-                
-            if time.time() - start_time > timeout_val:
-                process.terminate()
-                pbar.close()
-                err = f"Protenix batch timed out ({timeout_val}s)"
-                for p in payload:
-                    results.append((p["name"], None, {"error": err}))
-                return results
+    for chunk_idx in range(n_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = min(chunk_start + chunk_size, len(payload))
+        chunk_payload = payload[chunk_start:chunk_end]
 
-            time.sleep(2.0)
+        chunk_dir = work_dir / f"chunk_{chunk_idx:04d}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
 
-        remaining_update = len(payload) - len(completed)
-        if remaining_update > 0 and retcode == 0:
-            pbar.update(remaining_update)
-            
-        pbar.close()
-        stdout, stderr = process.communicate()
-        
-        if retcode != 0:
-            logger.error(f"Protenix batch process exited with code {retcode}. Stderr: {stderr[:500]}")
+        chunk_json = chunk_dir / "chunk_input.json"
+        with open(chunk_json, "w") as f:
+            json.dump(chunk_payload, f, indent=2)
 
-    except FileNotFoundError:
-        err = "protenix CLI not found"
-        for p in payload:
-            results.append((p["name"], None, {"error": err}))
-        return results
-    except Exception as e:
-        err = f"Protenix batch exception: {str(e)}"
-        for p in payload:
-            results.append((p["name"], None, {"error": err}))
-        return results
-
-    # Parse output for each design
-    for p in payload:
-        design_name = p["name"]
-        jinfo = job_info[design_name]
-        
-        # Try both the prefix pattern and exact subdirectory if it made one
-        subset_files = [
-            cf for cf in work_dir.rglob("*_summary_confidence_sample_*.json") 
-            if cf.name.startswith(f"{design_name}_summary_confidence") or cf.parent.name == design_name
+        cmd = [
+            protenix_cmd, "pred",
+            "-i", str(chunk_json),
+            "-o", str(chunk_dir),
+            "-n", model_name,
+            "--seeds", str(seed),
+            "--use_msa", "true",       # Precomputed MSAs are in JSON; search is skipped if paths exist
+            "--use_template", "true" if resolved_template_path else "false",
+            "--enable_cache", "true",
         ]
         
-        best_cif = None
-        best_scores = {"plddt": 0.0, "ptm": 0.0, "iptm": 0.0}
-        best_data = {}
-        
-        if subset_files:
-            sample_confidences = []
-            for cf in subset_files:
-                try:
-                    with open(cf, 'r') as f:
-                        data = json.load(f)
-                        score = data.get("ranking_score", data.get("iptm", 0.0))
-                        sample_confidences.append((cf, score, data))
-                except Exception:
-                    continue
-            
-            if sample_confidences:
-                sample_confidences.sort(key=lambda x: x[1], reverse=True)
-                best_conf_file, _, best_data = sample_confidences[0]
-                
-                sample_suffix = best_conf_file.name.replace("_summary_confidence_", "_").replace(".json", ".cif")
-                potential_cif = best_conf_file.parent / sample_suffix
-                if potential_cif.exists():
-                    best_cif = potential_cif
-                
-        if not best_cif:
-            cifs = [c for c in work_dir.rglob("*.cif") if c.name.startswith(f"{design_name}_") or c.parent.name == design_name]
-            if cifs:
-                best_cif = cifs[0]
-                
-        if not best_cif:
-            results.append((design_name, None, {"error": "No output cif found for this design"}))
-            continue
-            
-        # Optional: Save a standard pdb next to it
-        protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
+        if chunk_idx == 0:
+            logger.info(f"Protenix command: {' '.join(cmd)}")
+
+        chunk_start_time = time.time()
+        timeout_per_chunk = len(chunk_payload) * 600  # 10 min per design
+
+        completed_in_chunk: set = set()
+
         try:
-            _cif_to_pdb(str(best_cif), protenix_pdb_path)
-        except Exception:
-            pass
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
-        plddt_val = best_scores["plddt"]
-        if plddt_val < 1.0:
-            plddt_val *= 100.0
-            
-        binder_plddt = plddt_val
-        if "chain_plddt" in best_data and len(best_data["chain_plddt"]) > 1:
-            binder_plddt = best_data["chain_plddt"][1] * 100.0
+            while True:
+                retcode = process.poll()
 
-        metrics = {
-            "pLDDT": plddt_val,
-            "binder_pLDDT": binder_plddt,
-            "pTM": best_data.get("ptm", 0.0),
-            "i_pTM": best_data.get("iptm", 0.0),
-            "pAE": None,
-            "i_pAE": None,
-            "sequence": jinfo["binder_seq"],
-            "binder_length": jinfo["binder_len"],
-            "folding_model": model_name,
-        }
-        results.append((design_name, protenix_pdb_path, metrics))
+                current_cifs = list(chunk_dir.rglob("*.cif"))
+                for cp in chunk_payload:
+                    dn = cp["name"]
+                    if dn in completed_in_chunk:
+                        continue
+                    if any(c.name.startswith(f"{dn}_") or c.parent.name == dn for c in current_cifs):
+                        completed_in_chunk.add(dn)
+                        pbar.update(1)
+
+                if retcode is not None:
+                    break
+
+                if time.time() - chunk_start_time > timeout_per_chunk:
+                    process.terminate()
+                    logger.error(f"Chunk {chunk_idx} timed out after {timeout_per_chunk}s")
+                    for cp in chunk_payload:
+                        if cp["name"] not in completed_in_chunk:
+                            results.append((cp["name"], None, {"error": f"Chunk {chunk_idx} timed out"}))
+                    break
+
+                time.sleep(2.0)
+
+            # Final sweep after process exits to catch any remaining outputs
+            if retcode is not None:
+                remaining_cifs = list(chunk_dir.rglob("*.cif"))
+                for cp in chunk_payload:
+                    dn = cp["name"]
+                    if dn not in completed_in_chunk:
+                        if any(
+                            c.name.startswith(f"{dn}_") or c.parent.name == dn
+                            for c in remaining_cifs
+                        ):
+                            completed_in_chunk.add(dn)
+                            pbar.update(1)
+
+                _, stderr = process.communicate()
+                if retcode != 0:
+                    logger.error(f"Chunk {chunk_idx} exited {retcode}. Stderr: {stderr[:500]}")
+
+            chunk_elapsed = time.time() - chunk_start_time
+            logger.info(
+                f"Chunk {chunk_idx+1}/{n_chunks}: "
+                f"{len(completed_in_chunk)}/{len(chunk_payload)} designs in {chunk_elapsed:.1f}s"
+            )
+
+        except FileNotFoundError:
+            pbar.close()
+            err = "protenix CLI not found"
+            for cp in chunk_payload:
+                results.append((cp["name"], None, {"error": err}))
+            for ri in range(chunk_idx + 1, n_chunks):
+                rs, re = ri * chunk_size, min((ri + 1) * chunk_size, len(payload))
+                for cp in payload[rs:re]:
+                    results.append((cp["name"], None, {"error": err}))
+            return results
+        except Exception as e:
+            err = f"Protenix chunk {chunk_idx} exception: {e}"
+            logger.error(err)
+            for cp in chunk_payload:
+                if cp["name"] not in completed_in_chunk:
+                    results.append((cp["name"], None, {"error": err}))
+            continue
+
+        # -------------------------------------------------------------------
+        # Parse outputs for this chunk
+        # -------------------------------------------------------------------
+        already_reported = {r[0] for r in results}
+        for cp in chunk_payload:
+            design_name = cp["name"]
+            if design_name in already_reported:
+                continue
+
+            if design_name not in completed_in_chunk:
+                results.append((design_name, None, {"error": "No output produced"}))
+                continue
+
+            jinfo = job_info.get(design_name)
+            if not jinfo or "error" in jinfo:
+                results.append((design_name, None, {"error": (jinfo or {}).get("error", "Unknown")}))
+                continue
+
+            best_cif, best_data = _pick_best_sample(chunk_dir, design_name)
+            if best_cif is None:
+                results.append((design_name, None, {"error": "No output cif found for this design"}))
+                continue
+
+            protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
+            try:
+                _cif_to_pdb(str(best_cif), protenix_pdb_path)
+            except Exception:
+                pass
+
+            metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
+            results.append((design_name, protenix_pdb_path, metrics))
+
+    pbar.close()
+    n_ok = sum(1 for r in results if r[1] is not None)
+    total_elapsed = time.time() - global_start
+    logger.info(f"Protenix batch complete: {n_ok}/{len(payload)} designs succeeded in {total_elapsed:.1f}s")
 
     return results
+
+
+def prepare_msa_dir_from_a3m(
+    non_pairing_a3m: str,
+    output_dir: Path,
+) -> str:
+    """
+    Build the Protenix MSA directory structure from an existing non-pairing .a3m file.
+
+    Creates *output_dir* and symlinks (or copies) the supplied file as
+    ``non_pairing.a3m`` inside it.  No ``pairing.a3m`` is created — Protenix
+    treats the field as optional and will simply skip paired-MSA features.
+
+    Returns the absolute path to *output_dir*.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    src = Path(non_pairing_a3m).absolute()
+    if not src.exists():
+        raise FileNotFoundError(f"Supplied non-pairing MSA not found: {src}")
+
+    dst = output_dir / "non_pairing.a3m"
+    if not dst.exists():
+        try:
+            dst.symlink_to(src)
+        except OSError:
+            import shutil
+            shutil.copy2(src, dst)
+
+    logger.info(f"MSA directory prepared from {src} → {output_dir}")
+    return str(output_dir.absolute())
+
+
+def generate_target_msa_dir(
+    target_seq: str,
+    output_dir: Path,
+    msa_server_mode: str = "protenix",
+) -> str:
+    """
+    Generate a precomputed MSA directory for the target sequence using
+    `protenix msa --msa_server_mode <mode>`.
+
+    Returns the absolute path to the directory containing
+    `pairing.a3m` and `non_pairing.a3m`.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fasta_path = output_dir / "target.fasta"
+    with open(fasta_path, "w") as f:
+        f.write(f">target\n{target_seq}\n")
+
+    protenix_cmd = _resolve_protenix_cmd()
+    cmd = [
+        protenix_cmd, "msa",
+        "--input", str(fasta_path),
+        "--out_dir", str(output_dir),
+        "--msa_server_mode", msa_server_mode,
+    ]
+    logger.info(f"Generating target MSA: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"protenix msa failed: {result.stderr}")
+
+    # Find the directory containing non_pairing.a3m — take the first match
+    candidates = list(output_dir.rglob("non_pairing.a3m"))
+    if not candidates:
+        raise FileNotFoundError(f"protenix msa produced no non_pairing.a3m in {output_dir}")
+
+    msa_dir = candidates[0].parent
+    logger.info(f"Target MSA directory: {msa_dir}")
+    return str(msa_dir.absolute())
+
+
+def generate_target_msa_and_template_dir(
+    target_seq: str,
+    output_dir: Path,
+    msa_server_mode: str = "protenix",
+) -> Tuple[str, Optional[str]]:
+    """
+    Generate MSA + structural templates for the target sequence in one step using
+    `protenix mt` (msatemplate — online search).
+
+    `protenix mt` searches PDB for homologous structures, which Protenix then uses
+    as structural templates to bias target folding.  For well-characterised targets
+    (e.g. PDL1, EGFR) this typically finds the exact crystal structure.
+
+    Returns: (msa_dir_path, template_a3m_path)
+      - msa_dir_path     : directory containing pairing.a3m + non_pairing.a3m
+      - template_a3m_path: path to hmmsearch.a3m (or .hhr) for use as templatesPath;
+                           None if not found (template inference is then skipped)
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build a minimal Protenix JSON for the target sequence
+    input_json = output_dir / "target_input.json"
+    with open(input_json, "w") as f:
+        json.dump([{
+            "name": "target",
+            "sequences": [{"proteinChain": {"count": 1, "sequence": target_seq, "modifications": []}}],
+        }], f, indent=2)
+
+    protenix_cmd = _resolve_protenix_cmd()
+    cmd = [
+        protenix_cmd, "mt",
+        "-i", str(input_json),
+        "-o", str(output_dir),
+        "-m", msa_server_mode,
+    ]
+    logger.info(f"Generating target MSA + template: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"protenix mt failed: {result.stderr}")
+
+    # Locate MSA directory
+    candidates = list(output_dir.rglob("non_pairing.a3m"))
+    if not candidates:
+        raise FileNotFoundError(f"protenix mt produced no non_pairing.a3m in {output_dir}")
+    msa_dir = candidates[0].parent
+
+    # Locate template file (.a3m or .hhr from hmmsearch)
+    template_path: Optional[str] = None
+    for pattern in ("hmmsearch.a3m", "*.hhr", "*.a3m"):
+        hits = [
+            p for p in output_dir.rglob(pattern)
+            if p.name != "non_pairing.a3m" and p.name != "pairing.a3m"
+        ]
+        if hits:
+            template_path = str(hits[0].absolute())
+            logger.info(f"Template file: {template_path}")
+            break
+
+    return str(msa_dir.absolute()), template_path
+
+
+def prepare_template_from_pdb(
+    pdb_or_cif_path: str,
+    output_dir: Path,
+    msa_server_mode: str = "protenix",
+) -> Tuple[str, Optional[str]]:
+    """
+    Convenience wrapper: extract Chain A sequence from a PDB/CIF file, then call
+    `generate_target_msa_and_template_dir` to search PDB for matching templates.
+
+    Returns: (msa_dir_path, template_a3m_path)
+    """
+    from pipeline.scoring.utils import extract_sequence_from_pdb
+    target_seq = extract_sequence_from_pdb(pdb_or_cif_path, "A")
+    if not target_seq:
+        raise ValueError(f"Could not extract Chain A sequence from {pdb_or_cif_path}")
+    target_seq = "".join(c for c in target_seq.upper() if "A" <= c <= "Z")
+    return generate_target_msa_and_template_dir(target_seq, output_dir, msa_server_mode)
 
 
 def auto_generate_msa(
     pdb_path: str,
     output_dir: Path,
-    db_path: str,
+    db_path: str = "",
+    msa_server_mode: str = "protenix",
 ) -> str:
     """
-    Generate a target MSA using 'protenix prep' once.
-    Returns the path to the generated .a3m file.
+    Generate a target MSA from a PDB file (extracts Chain A sequence, then calls
+    `generate_target_msa_dir`).
+
+    Returns the absolute path to the MSA directory.
+    The *db_path* parameter is kept for backward compatibility but is unused when
+    *msa_server_mode* is "protenix" (online server is used instead).
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 1. Extract target sequence
-    try:
-        from pipeline.scoring.utils import extract_sequence_from_pdb
-        target_seq = extract_sequence_from_pdb(pdb_path, "A")
-    except Exception:
-        # Fallback
-        from Bio.PDB import PDBParser
-        parser = PDBParser(QUIET=True)
-        struct = parser.get_structure("tmp", pdb_path)
-        residues = [r for r in struct.get_residues() if r.get_parent().id == "A"]
-        from Bio.SeqUtils import seq1
-        target_seq = "".join([seq1(r.get_resname()) for r in residues])
-
-    # 2. Build minimal prep input
-    prep_input = [
-        {
-            "name": "target_ref",
-            "sequences": [
-                {"proteinChain": {"count": 1, "sequence": target_seq}}
-            ]
-        }
-    ]
-    json_path = output_dir / "prep_input.json"
-    with open(json_path, "w") as f:
-        json.dump(prep_input, f, indent=2)
-
-    # 3. Resolve protenix command
-    protenix_cmd = "protenix"
-    try:
-        conda_base = subprocess.check_output(["conda", "info", "--base"], text=True).strip()
-        protenix_bin = os.path.join(conda_base, "envs", "protenix_env", "bin", "protenix")
-        if os.path.exists(protenix_bin):
-            protenix_cmd = protenix_bin
-    except Exception:
-        pass
-
-    # 4. Run protenix prep
-    cmd = [
-        protenix_cmd, "prep",
-        "-i", str(json_path),
-        "-o", str(output_dir),
-        "--database_dir", db_path
-    ]
-    
-    logger.info(f"Running Protenix MSA prep: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        raise RuntimeError(f"Protenix prep failed: {result.stderr}")
-
-    # 5. Extract the generated .a3m path
-    msa_path = output_dir / "target_ref" / "msa" / "0" / "non_pairing.a3m"
-    if not msa_path.exists():
-        candidates = list(output_dir.rglob("*.a3m"))
-        if candidates:
-            msa_path = candidates[0]
-        else:
-            raise FileNotFoundError(f"Could not find generated MSA (.a3m) in {output_dir}")
-
-    return str(msa_path.absolute())
+    from pipeline.scoring.utils import extract_sequence_from_pdb
+    target_seq = extract_sequence_from_pdb(pdb_path, "A")
+    if not target_seq:
+        raise ValueError(f"Could not extract Chain A sequence from {pdb_path}")
+    target_seq = "".join(c for c in target_seq.upper() if "A" <= c <= "Z")
+    return generate_target_msa_dir(target_seq, output_dir, msa_server_mode=msa_server_mode)

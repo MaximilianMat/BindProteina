@@ -169,27 +169,34 @@ def main():
     parser.add_argument(
         "--folding_model",
         type=str,
-        default="af2",
-        choices=["af2", "protenix"],
-        help="Folding model to use for refolding (default: af2)"
+        default=None,
+        help="Folding model to use for refolding (af2 or protenix)"
     )
     parser.add_argument(
         "--protenix_model",
         type=str,
-        default="protenix-v2",
-        help="Protenix model name (default: protenix-v2)"
+        default=None,
+        help="Protenix model name"
     )
     parser.add_argument(
         "--target_msa",
         type=str,
         default=None,
-        help="Optional path to pre-computed target MSA (.a3m) for Chain A"
+        help="Optional path to pre-computed target MSA (.a3m file or directory) for Chain A"
     )
     parser.add_argument(
         "--msa_db",
         type=str,
         default=None,
         help="Path to MSA database directory for auto-generating target MSAs"
+    )
+    parser.add_argument(
+        "--target_template",
+        type=str,
+        default=None,
+        help="Optional path to structural template for target Chain A. Accepts a .pdb/.cif "
+             "file (protenix mt is run online to find matching PDB templates) or a pre-computed "
+             ".a3m/.hhr template file. Enables --use_template true in Protenix."
     )
     
     args = parser.parse_args()
@@ -206,6 +213,25 @@ def main():
     
     settings = load_settings(settings_path)
     logger.info(f"Loaded settings from: {settings_path}")
+
+    # Helper to merge CLI and JSON settings
+    def get_setting(key, cli_val, default=None):
+        if cli_val is not None:
+            return cli_val
+        return settings.get(key, default)
+
+    folding_model = get_setting("folding_model", args.folding_model, "af2")
+    protenix_model = get_setting("protenix_model", args.protenix_model, "protenix-v2")
+    target_msa = get_setting("target_msa", args.target_msa)
+    msa_db = get_setting("msa_db", args.msa_db)
+    target_template = get_setting("target_template", args.target_template)
+    
+    if target_msa:
+        target_msa = fix_path(target_msa)
+    if msa_db:
+        msa_db = fix_path(msa_db)
+    if target_template:
+        target_template = fix_path(target_template)
     
     # Extract settings (settings_target format)
     lp_settings = settings.get("laproteina_settings", {})
@@ -577,10 +603,11 @@ def main():
                 output_dir=str(output_dir),
                 filters_path=str(filter_settings_path) if filter_settings_path.exists() else None,
                 af2_model_idx=None,
-                folding_model=args.folding_model,
-                protenix_model_name=args.protenix_model,
-                target_msa=args.target_msa,
-                msa_db_path=args.msa_db,
+                folding_model=folding_model,
+                protenix_model_name=protenix_model,
+                target_msa=target_msa,
+                msa_db_path=msa_db,
+                target_template=target_template,
             )
         except Exception as e:
             logger.error(f"Modular scoring failed: {e}")
