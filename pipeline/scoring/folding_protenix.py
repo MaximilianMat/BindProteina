@@ -55,6 +55,9 @@ def _attach_msa_to_chain(chain: dict, target_msa_path: Optional[str]) -> None:
     """
     if not target_msa_path:
         return
+    # Skip if paths already exist
+    if "pairedMsaPath" in chain and "unpairedMsaPath" in chain:
+        return
     p = Path(target_msa_path)
     if p.is_dir():
         paired = p / "pairing.a3m"
@@ -201,7 +204,7 @@ def _pick_best_sample(
         if design_name:
             cifs = [
                 c for c in search_dir.rglob("*.cif")
-                if c.name.startswith(f"{design_name}_") or c.parent.name == design_name
+                if c.name.startswith(f"{design_name}_sample_") or c.parent.name == design_name
             ]
         else:
             cifs = list(search_dir.rglob("*.cif"))
@@ -223,17 +226,20 @@ def _build_metrics_dict(
         plddt *= 100.0
 
     chain_plddt = best_data.get("chain_plddt") or []
-    binder_plddt = chain_plddt[1] * 100.0 if len(chain_plddt) > 1 else plddt
+    binder_plddt = (
+        sum(chain_plddt[1:]) / len(chain_plddt[1:]) * 100.0
+        if len(chain_plddt) > 1 else plddt
+    )
 
     chain_iptm = best_data.get("chain_iptm") or []
-    binder_iptm = chain_iptm[1] if len(chain_iptm) > 1 else None
+    binder_iptm = (
+        sum(chain_iptm[1:]) / len(chain_iptm[1:])
+        if len(chain_iptm) > 1 else None
+    )
 
     chain_pair_iptm = best_data.get("chain_pair_iptm") or []
-    cross_iptm = (
-        chain_pair_iptm[0][1]
-        if (len(chain_pair_iptm) > 0 and len(chain_pair_iptm[0]) > 1)
-        else None
-    )
+    binder_cols = chain_pair_iptm[0][1:] if (len(chain_pair_iptm) > 0 and len(chain_pair_iptm[0]) > 1) else []
+    cross_iptm = sum(binder_cols) / len(binder_cols) if binder_cols else None
 
     return {
         "pLDDT":           plddt,
@@ -348,6 +354,7 @@ def run_protenix_refolding_batch(
     target_msa_path: Optional[str] = None,
     target_template_path: Optional[str] = None,
     chunk_size: int = 40,
+    fetch_all_msas: bool = False,
 ) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
     """
     Run Protenix structure prediction on multiple complex PDBs using chunked batches.
@@ -368,6 +375,17 @@ def run_protenix_refolding_batch(
     # -----------------------------------------------------------------------
     # Resolve precomputed MSA + template paths once for all designs
     # -----------------------------------------------------------------------
+    import hashlib
+    msa_cache_dir = work_dir / "msa_cache"
+    msa_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_msa_for_seq(seq: str) -> str:
+        s_hash = hashlib.md5(seq.encode()).hexdigest()
+        s_dir = msa_cache_dir / s_hash
+        if not (s_dir / "non_pairing.a3m").exists():
+            return generate_target_msa_dir(seq, s_dir)
+        cands = list(s_dir.rglob("non_pairing.a3m"))
+        return str(cands[0].parent.absolute())
     from pipeline.generate import fix_path
 
     resolved_msa_path: Optional[str] = None
@@ -417,25 +435,30 @@ def run_protenix_refolding_batch(
             job_info[design_name] = {"error": "Empty binder sequence"}
             continue
 
-        # Write minimal single-sequence MSA for the binder (both paired and unpaired).
-        # Format matches Protenix's own output for sequences with no homologs found:
-        # two lines per file — ">query" header then the bare sequence.
-        binder_a3m = binder_msa_dir / f"{design_name}_binder.a3m"
-        if not binder_a3m.exists():
-            binder_a3m.write_text(f">query\n{binder_seq}\n")
-
-        binder_chain: dict = {
-            "count": 1,
-            "sequence": binder_seq,
-            "modifications": [],
-            "unpairedMsaPath": str(binder_a3m),
-            "pairedMsaPath": str(binder_a3m),
-        }
-
+        # Chain A (Target)
         target_chain: dict = {"count": 1, "sequence": target_seq, "modifications": []}
-        _attach_msa_to_chain(target_chain, resolved_msa_path)
+        # Check if already has MSAs (from input PDB or previous step)
+        if "pairedMsaPath" not in target_chain:
+            if resolved_msa_path:
+                _attach_msa_to_chain(target_chain, resolved_msa_path)
+            elif fetch_all_msas:
+                _attach_msa_to_chain(target_chain, get_msa_for_seq(target_seq))
+        
         if resolved_template_path:
             target_chain["templatesPath"] = resolved_template_path
+
+        # Chain B (Binder)
+        binder_chain: dict = {"count": 1, "sequence": binder_seq, "modifications": []}
+        if "pairedMsaPath" not in binder_chain:
+            if fetch_all_msas:
+                _attach_msa_to_chain(binder_chain, get_msa_for_seq(binder_seq))
+            else:
+                # Default to dummy for de novo binders
+                binder_a3m = binder_msa_dir / f"{design_name}_binder.a3m"
+                if not binder_a3m.exists():
+                    binder_a3m.write_text(f">query\n{binder_seq}\n")
+                binder_chain["unpairedMsaPath"] = str(binder_a3m)
+                binder_chain["pairedMsaPath"] = str(binder_a3m)
 
         payload.append({
             "name": design_name,
@@ -490,7 +513,7 @@ def run_protenix_refolding_batch(
             "-o", str(chunk_dir),
             "-n", model_name,
             "--seeds", str(seed),
-            "--use_msa", "true",       # Precomputed MSAs are in JSON; search is skipped if paths exist
+            "--use_msa", "true",       # Enable MSA features
             "--use_template", "true" if resolved_template_path else "false",
             "--enable_cache", "true",
         ]
@@ -519,7 +542,7 @@ def run_protenix_refolding_batch(
                     dn = cp["name"]
                     if dn in completed_in_chunk:
                         continue
-                    if any(c.name.startswith(f"{dn}_") or c.parent.name == dn for c in current_cifs):
+                    if any(c.name.startswith(f"{dn}_sample_") or c.parent.name == dn for c in current_cifs):
                         completed_in_chunk.add(dn)
                         pbar.update(1)
 
@@ -614,6 +637,277 @@ def run_protenix_refolding_batch(
     total_elapsed = time.time() - global_start
     logger.info(f"Protenix batch complete: {n_ok}/{len(payload)} designs succeeded in {total_elapsed:.1f}s")
 
+    return results
+
+
+def run_protenix_from_json_payload(
+    entries: List[dict],
+    output_dir: Path,
+    model_name: str = "protenix-v2",
+    seed: int = 42,
+    target_msa_path: Optional[str] = None,
+    target_template_path: Optional[str] = None,
+    chunk_size: int = 40,
+    fetch_all_msas: bool = False,
+) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
+    """
+    Run Protenix on complexes defined by a Protenix-style input JSON list.
+
+    Sequences are taken directly from the JSON entries (no PDB files needed).
+    Convention: first chain in each entry = target; all remaining chains = binder.
+    `id` fields are stripped so Protenix assigns chains A, B, C... in sequence order.
+
+    The returned metrics_dict contains a ``"binder_chains"`` key (e.g. ``"BC"``) for
+    use as the PyRosetta interface specification.
+
+    Returns: List of (design_name, path_to_protenix_pdb, metrics_dict)
+    """
+    import copy
+    import time
+    import hashlib
+    from tqdm import tqdm
+
+    work_dir = output_dir / "protenix_json_batch"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    binder_msa_dir = work_dir / "binder_msas"
+    binder_msa_dir.mkdir(parents=True, exist_ok=True)
+    
+    msa_cache_dir = work_dir / "msa_cache"
+    msa_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    def get_msa_for_seq(seq: str) -> str:
+        s_hash = hashlib.md5(seq.encode()).hexdigest()
+        s_dir = msa_cache_dir / s_hash
+        if not (s_dir / "non_pairing.a3m").exists():
+            return generate_target_msa_dir(seq, s_dir)
+        # Find already generated msa_dir inside the hash dir
+        cands = list(s_dir.rglob("non_pairing.a3m"))
+        return str(cands[0].parent.absolute())
+    binder_msa_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_msa_path: Optional[str] = None
+    if target_msa_path:
+        msa_obj = Path(target_msa_path).absolute()
+        if msa_obj.exists():
+            resolved_msa_path = str(msa_obj)
+            logger.info(f"Using pre-computed target MSA: {resolved_msa_path}")
+        else:
+            logger.warning(f"Target MSA path provided but NOT FOUND: {msa_obj}")
+
+    resolved_template_path: Optional[str] = None
+    if target_template_path:
+        tpl_obj = Path(target_template_path).absolute()
+        if tpl_obj.exists():
+            resolved_template_path = str(tpl_obj)
+        else:
+            logger.warning(f"Template path provided but NOT FOUND: {tpl_obj}")
+
+    payload: list = []
+    job_info: dict = {}
+
+    for entry in entries:
+        design_name = entry.get("name", "unknown")
+        raw_chains = entry.get("sequences", [])
+        if not raw_chains:
+            job_info[design_name] = {"error": "No sequences in entry"}
+            continue
+
+        chains = copy.deepcopy(raw_chains)
+
+        # Extract sequences and strip id fields (so Protenix assigns A, B, C... in order)
+        chain_seqs: List[str] = []
+        for chain_entry in chains:
+            pc = chain_entry.get("proteinChain", {})
+            seq = "".join(c for c in pc.get("sequence", "").upper() if "A" <= c <= "Z")
+            pc.pop("id", None)
+            chain_seqs.append(seq)
+
+        if not chain_seqs[0]:
+            job_info[design_name] = {"error": "Empty target sequence"}
+            continue
+        binder_seqs = chain_seqs[1:]
+        if not binder_seqs:
+            job_info[design_name] = {"error": "No binder chains in entry"}
+            continue
+
+        binder_chain_labels = "".join(chr(ord('B') + i) for i in range(len(binder_seqs)))
+        binder_seq_combined = "/".join(binder_seqs)
+        binder_len_total = sum(len(s) for s in binder_seqs)
+
+        # Build the payload entry, preserving all extra fields (N_sample, N_cycle, etc.)
+        new_entry = copy.deepcopy(entry)
+        new_entry["name"] = design_name
+        new_entry["sequences"] = chains
+        new_entry["covalent_bonds"] = entry.get("covalent_bonds", [])
+        
+        # Attach MSAs to chains
+        for i, chain_entry in enumerate(new_entry["sequences"]):
+            pc = chain_entry["proteinChain"]
+            seq = pc["sequence"]
+            
+            # Skip if already has MSAs in the input JSON
+            if "pairedMsaPath" in pc and "unpairedMsaPath" in pc:
+                continue
+
+            if i == 0:
+                # Target chain
+                if resolved_msa_path:
+                    _attach_msa_to_chain(pc, resolved_msa_path)
+                elif fetch_all_msas:
+                    _attach_msa_to_chain(pc, get_msa_for_seq(seq))
+                if resolved_template_path:
+                    pc["templatesPath"] = resolved_template_path
+            else:
+                # Binder chains
+                if fetch_all_msas:
+                    _attach_msa_to_chain(pc, get_msa_for_seq(seq))
+                else:
+                    # Default to dummy for de novo binders
+                    a3m_path = binder_msa_dir / f"{design_name}_chain{i}.a3m"
+                    if not a3m_path.exists():
+                        a3m_path.write_text(f">query\n{seq}\n")
+                    pc["unpairedMsaPath"] = str(a3m_path)
+                    pc["pairedMsaPath"] = str(a3m_path)
+
+        payload.append(new_entry)
+        job_info[design_name] = {
+            "binder_seq": binder_seq_combined,
+            "binder_len": binder_len_total,
+            "binder_chains": binder_chain_labels,
+        }
+
+    results: list = []
+    if not payload:
+        for entry in entries:
+            dn = entry.get("name", "unknown")
+            results.append((dn, None, {"error": job_info.get(dn, {}).get("error", "Failed precondition")}))
+        return results
+
+    with open(work_dir / "batch_input.json", "w") as f:
+        json.dump(payload, f, indent=2)
+
+    protenix_cmd = _resolve_protenix_cmd()
+    n_chunks = (len(payload) + chunk_size - 1) // chunk_size
+    logger.info(f"Protenix JSON Batch: {len(payload)} complexes → {n_chunks} chunk(s) of ≤{chunk_size}")
+
+    pbar = tqdm(total=len(payload), desc="Protenix JSON Batch", unit="complex")
+    global_start = time.time()
+
+    for chunk_idx in range(n_chunks):
+        chunk_start_idx = chunk_idx * chunk_size
+        chunk_end_idx = min(chunk_start_idx + chunk_size, len(payload))
+        chunk_payload = payload[chunk_start_idx:chunk_end_idx]
+
+        chunk_dir = work_dir / f"chunk_{chunk_idx:04d}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        chunk_json = chunk_dir / "chunk_input.json"
+        with open(chunk_json, "w") as f:
+            json.dump(chunk_payload, f, indent=2)
+
+        cmd = [
+            protenix_cmd, "pred",
+            "-i", str(chunk_json),
+            "-o", str(chunk_dir),
+            "-n", model_name,
+            "--seeds", str(seed),
+            "--use_msa", "true",       # Enable MSA features (skipped for chains with paths)
+            "--use_template", "true" if resolved_template_path else "false",
+            "--enable_cache", "true",
+        ]
+        
+        if chunk_idx == 0:
+            logger.info(f"Protenix command: {' '.join(cmd)}")
+
+        chunk_t0 = time.time()
+        timeout_per_chunk = len(chunk_payload) * 600
+        completed_in_chunk: set = set()
+
+        try:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            while True:
+                retcode = process.poll()
+                current_cifs = list(chunk_dir.rglob("*.cif"))
+                for cp in chunk_payload:
+                    dn = cp["name"]
+                    if dn in completed_in_chunk:
+                        continue
+                    if any(c.name.startswith(f"{dn}_sample_") or c.parent.name == dn for c in current_cifs):
+                        completed_in_chunk.add(dn)
+                        pbar.update(1)
+                if retcode is not None:
+                    break
+                if time.time() - chunk_t0 > timeout_per_chunk:
+                    process.terminate()
+                    for cp in chunk_payload:
+                        if cp["name"] not in completed_in_chunk:
+                            results.append((cp["name"], None, {"error": f"Chunk {chunk_idx} timed out"}))
+                    break
+                time.sleep(2.0)
+
+            if retcode is not None:
+                for cp in chunk_payload:
+                    dn = cp["name"]
+                    if dn not in completed_in_chunk:
+                        if any(c.name.startswith(f"{dn}_") or c.parent.name == dn
+                               for c in chunk_dir.rglob("*.cif")):
+                            completed_in_chunk.add(dn)
+                            pbar.update(1)
+                _, stderr = process.communicate()
+                if retcode != 0:
+                    logger.error(f"Chunk {chunk_idx} exited {retcode}. Stderr: {stderr[:500]}")
+
+            logger.info(
+                f"Chunk {chunk_idx+1}/{n_chunks}: "
+                f"{len(completed_in_chunk)}/{len(chunk_payload)} in {time.time()-chunk_t0:.1f}s"
+            )
+
+        except FileNotFoundError:
+            pbar.close()
+            err = "protenix CLI not found"
+            for cp in chunk_payload:
+                results.append((cp["name"], None, {"error": err}))
+            for ri in range(chunk_idx + 1, n_chunks):
+                rs, re = ri * chunk_size, min((ri + 1) * chunk_size, len(payload))
+                for cp in payload[rs:re]:
+                    results.append((cp["name"], None, {"error": err}))
+            return results
+        except Exception as e:
+            err = f"Protenix chunk {chunk_idx} exception: {e}"
+            logger.error(err)
+            for cp in chunk_payload:
+                if cp["name"] not in completed_in_chunk:
+                    results.append((cp["name"], None, {"error": err}))
+            continue
+
+        already_reported = {r[0] for r in results}
+        for cp in chunk_payload:
+            design_name = cp["name"]
+            if design_name in already_reported:
+                continue
+            if design_name not in completed_in_chunk:
+                results.append((design_name, None, {"error": "No output produced"}))
+                continue
+            jinfo = job_info.get(design_name)
+            if not jinfo or "error" in jinfo:
+                results.append((design_name, None, {"error": (jinfo or {}).get("error", "Unknown")}))
+                continue
+            best_cif, best_data = _pick_best_sample(chunk_dir, design_name)
+            if best_cif is None:
+                results.append((design_name, None, {"error": "No output cif found"}))
+                continue
+            protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
+            try:
+                _cif_to_pdb(str(best_cif), protenix_pdb_path)
+            except Exception:
+                pass
+            metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
+            metrics["binder_chains"] = jinfo["binder_chains"]
+            results.append((design_name, protenix_pdb_path, metrics))
+
+    pbar.close()
+    n_ok = sum(1 for r in results if r[1] is not None)
+    logger.info(f"Protenix JSON batch complete: {n_ok}/{len(payload)} complexes in {time.time()-global_start:.1f}s")
     return results
 
 

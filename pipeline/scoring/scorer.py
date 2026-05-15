@@ -30,6 +30,8 @@ def score_complexes(
     target_msa: Optional[str] = None,
     msa_db_path: Optional[str] = None,
     target_template: Optional[str] = None,
+    force_rosetta: bool = False,
+    fetch_all_msas: bool = False,
 ):
     """
     Universal 2-stage scoring orchestrator.
@@ -53,6 +55,7 @@ def score_complexes(
             file (Chain A sequence is extracted and protenix mt is run online to find
             matching PDB templates).  When provided, --use_template true is passed to
             protenix pred, which biases the target conformation towards the known structure.
+        fetch_all_msas: Whether to fetch MSAs for all chains.
     """
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("medium")
@@ -71,7 +74,7 @@ def score_complexes(
     else:
         print("No filter file provided; folding filter stage will keep all designs.")
 
-    pdbs = sorted(input_path.glob("*.pdb"))
+    pdbs = sorted(input_path.rglob("*.pdb"))
     if not pdbs:
         print(f"No PDBs found in {input_path}")
         return
@@ -209,6 +212,7 @@ def score_complexes(
                 model_name=protenix_model_name,
                 target_msa_path=target_msa,
                 target_template_path=resolved_template,
+                fetch_all_msas=fetch_all_msas,
             )
             
             for design_name, folded_pdb, metrics in batch_results:
@@ -252,6 +256,9 @@ def score_complexes(
 
     af2_model_num_for_filter = af2_model_idx or 1
 
+    if force_rosetta:
+        print("--force_rosetta: skipping folding filters, sending all predicted designs to PyRosetta.")
+
     passing = []
     for row in folding_rows:
         if row.get("status") != "predicted":
@@ -260,6 +267,12 @@ def score_complexes(
 
         design_name = row["design_name"]
         folded_pdb = next((fp for dn, fp in folding_outputs if dn == design_name), None)
+
+        if force_rosetta:
+            row["folding_filter_pass"] = True
+            if folded_pdb:
+                passing.append((design_name, folded_pdb))
+            continue
 
         passed = True
         for metric, suffix in metric_to_suffix.items():
@@ -428,6 +441,298 @@ def score_complexes(
     print(f"Total Time:       {elapsed_total:.2f}s")
     print("==============================\n")
 
+    print(f"Saved final scoring summary to {summary_csv}")
+
+
+def score_from_protenix_json(
+    json_path: str,
+    output_dir: str,
+    filters_path: Optional[str] = None,
+    protenix_model_name: str = "protenix-v2",
+    target_msa: Optional[str] = None,
+    target_template: Optional[str] = None,
+    dalphaball_path: Optional[str] = None,
+    chunk_size: int = 50,
+    seed: int = 42,
+    force_rosetta: bool = False,
+    fetch_all_msas: bool = False,
+):
+    """
+    Full scoring pipeline starting from a Protenix-style input JSON.
+
+    No PDB files required — sequences are taken directly from the JSON.
+    Convention: first chain in each entry = target; all remaining chains = binder.
+
+    Stages:
+      1. Generate / resolve target MSA (first chain of first entry used for sequence).
+      2. Run Protenix to fold all complexes in the JSON.
+      3. Apply folding filters (if filters_path supplied).
+      4. Run PyRosetta on passing designs.
+      5. Write protenix_prescoring_results.csv and scoring_summary.csv.
+    """
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("medium")
+
+    start_total = time.time()
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    with open(json_path) as fh:
+        entries = json.load(fh)
+
+    if not entries:
+        print("Empty JSON — nothing to score.")
+        return
+
+    filters: dict = {}
+    if filters_path and os.path.exists(filters_path):
+        with open(filters_path) as fh:
+            filters = json.load(fh)
+        print(f"Using filters: {filters_path}")
+    else:
+        print("No filter file provided; folding filter stage will keep all designs.")
+
+    # ── Resolve / generate target MSA ─────────────────────────────────
+    from pipeline.scoring.folding_protenix import generate_target_msa_dir
+    import shutil as _shutil
+
+    msa_out_dir = out_path / "target_msa"
+    start_msa = time.time()
+    try:
+        first_chain_seq = "".join(
+            c for c in entries[0]["sequences"][0]["proteinChain"]["sequence"].upper()
+            if "A" <= c <= "Z"
+        )
+        if target_msa and Path(target_msa).is_file():
+            supplied_a3m = Path(target_msa).absolute()
+            print(f"Generating target pairing MSA; will override non_pairing.a3m with: {supplied_a3m.name}")
+            target_msa = generate_target_msa_dir(target_seq=first_chain_seq, output_dir=msa_out_dir)
+            non_pairing_dst = Path(target_msa) / "non_pairing.a3m"
+            if non_pairing_dst.exists():
+                non_pairing_dst.unlink()
+            _shutil.copy2(supplied_a3m, non_pairing_dst)
+        elif target_msa and Path(target_msa).is_dir():
+            pass  # use as-is
+        else:
+            print("Auto-generating target MSA (protenix online server)...")
+            target_msa = generate_target_msa_dir(target_seq=first_chain_seq, output_dir=msa_out_dir)
+        elapsed_msa = time.time() - start_msa
+        print(f"Target MSA directory: {target_msa} ({elapsed_msa:.1f}s)")
+    except Exception as e:
+        print(f"WARNING: MSA setup failed: {e}. Proceeding without MSA.")
+        target_msa = None
+        elapsed_msa = time.time() - start_msa
+
+    # ── Resolve template ───────────────────────────────────────────────
+    resolved_template: Optional[str] = target_template
+    if target_template:
+        tp = Path(target_template)
+        if tp.suffix.lower() in (".pdb", ".cif", ".mmcif"):
+            from pipeline.scoring.folding_protenix import prepare_template_from_pdb
+            print(f"Generating structural templates from: {target_template}")
+            try:
+                msa_dir, tpl_file = prepare_template_from_pdb(
+                    pdb_or_cif_path=target_template,
+                    output_dir=out_path / "target_template",
+                )
+                resolved_template = tpl_file
+                if target_msa is None and msa_dir:
+                    target_msa = msa_dir
+            except Exception as e:
+                print(f"WARNING: Template generation failed: {e}. Proceeding without template.")
+                resolved_template = None
+
+    # ── Stage 1: Protenix folding ──────────────────────────────────────
+    from pipeline.scoring.folding_protenix import run_protenix_from_json_payload
+
+    predictions_dir = out_path / "protenix_predictions"
+    predictions_dir.mkdir(parents=True, exist_ok=True)
+    start_folding = time.time()
+
+    print(f"Folding model: Protenix ({protenix_model_name}) — JSON Batch Mode")
+    batch_results = run_protenix_from_json_payload(
+        entries=entries,
+        output_dir=predictions_dir,
+        model_name=protenix_model_name,
+        seed=seed,
+        target_msa_path=target_msa,
+        target_template_path=resolved_template,
+        chunk_size=chunk_size,
+        fetch_all_msas=fetch_all_msas,
+    )
+
+    folding_rows = []
+    folding_outputs = []
+    for design_name, folded_pdb, metrics in batch_results:
+        if folded_pdb is None:
+            folding_rows.append({
+                "design_name": design_name,
+                "status": "failed",
+                "reason": metrics.get("error", "Unknown error"),
+            })
+        else:
+            folding_rows.append({"design_name": design_name, "status": "predicted", **metrics})
+            folding_outputs.append((design_name, folded_pdb, metrics.get("binder_chains", "B")))
+
+    folding_df = pd.DataFrame(folding_rows)
+    folding_csv = out_path / "protenix_prescoring_results.csv"
+    folding_df.to_csv(folding_csv, index=False)
+    print(f"Saved Protenix pre-scoring to {folding_csv}")
+    elapsed_folding = time.time() - start_folding
+
+    # ── Folding filters ────────────────────────────────────────────────
+    if force_rosetta:
+        print("--force_rosetta: skipping folding filters, sending all predicted designs to PyRosetta.")
+
+    metric_to_suffix = {
+        "pLDDT": "pLDDT", "binder_pLDDT": "Binder_pLDDT",
+        "pTM": "pTM", "i_pTM": "i_pTM", "pAE": "pAE", "i_pAE": "i_pAE",
+    }
+    passing = []
+    for row in folding_rows:
+        if row.get("status") != "predicted":
+            row["folding_filter_pass"] = False
+            continue
+
+        if force_rosetta:
+            row["folding_filter_pass"] = True
+            fo = next((t for t in folding_outputs if t[0] == row["design_name"]), None)
+            if fo:
+                passing.append(fo)
+            continue
+
+        passed = True
+        for metric, suffix in metric_to_suffix.items():
+            key, spec = _pick_filter_spec(filters, suffix, 1)
+            if not key or not spec:
+                continue
+            value = row.get(metric)
+            thr = spec.get("threshold")
+            if value is None or thr is None:
+                row[f"filter_{metric}"] = "N/A"
+                continue
+            higher = spec.get("higher", True)
+            if (higher and value < thr) or (not higher and value > thr):
+                row[f"filter_{metric}"] = "FAIL"
+                passed = False
+            else:
+                row[f"filter_{metric}"] = "PASS"
+        row["folding_filter_pass"] = passed
+        if passed:
+            fo = next((t for t in folding_outputs if t[0] == row["design_name"]), None)
+            if fo:
+                passing.append(fo)
+
+    folding_df = pd.DataFrame(folding_rows)
+    folding_df.to_csv(folding_csv, index=False)
+
+    total_folding = len(folding_rows)
+    if total_folding > 0:
+        print(f"\n--- Folding Filter Statistics ---")
+        print(f"Total: {total_folding}  Passing: {len(passing)} ({len(passing)/total_folding*100:.1f}%)")
+        print("---------------------------------\n")
+
+    if not passing:
+        print("No folding-passing designs; stopping before PyRosetta.")
+        print(f"\n=== Timing ===  MSA: {elapsed_msa:.1f}s  Folding: {elapsed_folding:.1f}s  "
+              f"Total: {time.time()-start_total:.1f}s\n")
+        return
+
+    # ── Stage 2: PyRosetta ─────────────────────────────────────────────
+    from pipeline.scoring.pyrosetta_scorer import run_pyrosetta_scoring
+
+    if dalphaball_path is None:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        dalphaball_path = str(repo_root / "functions" / "DAlphaBall.gcc")
+        if not os.path.exists(dalphaball_path):
+            print(f"WARNING: dalphaball not found at {dalphaball_path}.")
+
+    pyrosetta_metric_to_suffix = {
+        "binder_score": "Binder_Energy_Score",
+        "surface_hydrophobicity": "Surface_Hydrophobicity",
+        "interface_sc": "ShapeComplementarity",
+        "interface_packstat": "PackStat",
+        "interface_dG": "dG",
+        "interface_dSASA": "dSASA",
+        "interface_dG_SASA_ratio": "dG/dSASA",
+        "interface_hydrophobicity": "Interface_Hydrophobicity",
+        "interface_nres": "n_InterfaceResidues",
+        "interface_interface_hbonds": "n_InterfaceHbonds",
+        "interface_hbond_percentage": "InterfaceHbondsPercentage",
+        "interface_delta_unsat_hbonds": "n_InterfaceUnsatHbonds",
+        "interface_delta_unsat_hbonds_percentage": "InterfaceUnsatHbondsPercentage",
+    }
+
+    start_pyrosetta = time.time()
+    final_rows = []
+    pyrosetta_passing = 0
+
+    for design_name, folded_pdb, binder_chains in tqdm(passing, desc="PyRosetta Scoring"):
+        try:
+            interface_scores = run_pyrosetta_scoring(
+                af2_pdb=folded_pdb,
+                output_dir=out_path,
+                design_name=design_name,
+                dalphaball_path=dalphaball_path,
+                target_chains="A",
+                binder_chains=binder_chains,
+            )
+            folding_row = next((r for r in folding_rows if r.get("design_name") == design_name), {})
+            pyrosetta_passed = True
+            filter_results = {}
+            for metric, suffix in pyrosetta_metric_to_suffix.items():
+                key, spec = _pick_filter_spec(filters, suffix, 1)
+                if not key or not spec:
+                    continue
+                value = interface_scores.get(metric)
+                thr = spec.get("threshold")
+                if value is None or thr is None:
+                    filter_results[f"pyrosetta_filter_{metric}"] = "N/A"
+                    continue
+                higher = spec.get("higher", True)
+                if (higher and value < thr) or (not higher and value > thr):
+                    filter_results[f"pyrosetta_filter_{metric}"] = "FAIL"
+                    pyrosetta_passed = False
+                else:
+                    filter_results[f"pyrosetta_filter_{metric}"] = "PASS"
+            if pyrosetta_passed:
+                pyrosetta_passing += 1
+            final_rows.append({
+                "design_name": design_name,
+                "status": "scored",
+                "folding_model": folding_row.get("folding_model"),
+                "binder_chains": binder_chains,
+                "pLDDT": folding_row.get("pLDDT"),
+                "binder_pLDDT": folding_row.get("binder_pLDDT"),
+                "pTM": folding_row.get("pTM"),
+                "i_pTM": folding_row.get("i_pTM"),
+                "ranking_score": folding_row.get("ranking_score"),
+                "binder_length": folding_row.get("binder_length"),
+                **interface_scores,
+                **filter_results,
+                "pyrosetta_filter_pass": pyrosetta_passed,
+                "sequence": folding_row.get("sequence"),
+            })
+        except Exception as e:
+            final_rows.append({
+                "design_name": design_name,
+                "status": "rosetta_failed",
+                "reason": str(e),
+                "pyrosetta_filter_pass": False,
+            })
+
+    final_df = pd.DataFrame(final_rows)
+    summary_csv = out_path / "scoring_summary.csv"
+    final_df.to_csv(summary_csv, index=False)
+
+    elapsed_pyrosetta = time.time() - start_pyrosetta
+    elapsed_total = time.time() - start_total
+    print(f"\n=== Scoring Timing ===")
+    print(f"MSA:       {elapsed_msa:.1f}s")
+    print(f"Folding:   {elapsed_folding:.1f}s")
+    print(f"PyRosetta: {elapsed_pyrosetta:.1f}s")
+    print(f"Total:     {elapsed_total:.1f}s")
+    print(f"======================\n")
     print(f"Saved final scoring summary to {summary_csv}")
 
 

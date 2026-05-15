@@ -8,15 +8,15 @@
         "higher": false
     },
     "Average_pLDDT": {
-        "threshold": 0.0,
+        "threshold": null,
         "higher": true
     },
     "1_pLDDT": {
-        "threshold": 0.0,
+        "threshold": null,
         "higher": true
     },
     "2_pLDDT": {
-        "threshold": 0.0,
+        "threshold": null,
         "higher": true
     },
     "3_pLDDT": {

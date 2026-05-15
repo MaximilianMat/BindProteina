@@ -1,0 +1,27 @@
+{
+    "input_dir": "/nfs/homedirs/matscher/samples/",
+    "output_dir": "/nfs/students/matscher/samples/samples_cld18",
+    "starting_pdb": "/nfs/homedirs/matscher/targets/cld18/cld18_sp6.pdb",
+    "chains": "A",
+    "binder_name": "CLD18_LINKED_INPUT",
+    "linked_input_mode": true,
+    "target_length": 200,
+    "linker_length": 9,
+    "keep_linker_end_n": 7,
+    "direct_binder_mode": false,
+    "laproteina_settings": {
+        "checkpoint_path": "/nfs/students/matscher/laproteina_checkpoints/LD4_motif_idx_aa.ckpt",
+        "autoencoder_path": "/nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt",
+        "laproteina_mode": "all_atom",
+        "inference_config": "inference_motif_idx_aa",
+        "n_samples": 10000,
+        "batch_size": 2,
+        "n_linker_starting_points": 1,
+        "binder_length_range": [
+            40,
+            75
+        ]
+    },
+    "rosetta_relax": true,
+    "folding_model": "af2"
+}

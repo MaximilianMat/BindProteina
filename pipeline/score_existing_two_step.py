@@ -22,6 +22,8 @@ def main() -> None:
                         help="Folding model to use for refolding (default: af2)")
     parser.add_argument("--protenix_model", type=str, default="protenix-v2",
                         help="Protenix model name (default: protenix-v2)")
+    parser.add_argument("--force_rosetta", action="store_true",
+                        help="Run PyRosetta on all folded designs regardless of folding filter results.")
     args = parser.parse_args()
 
     filter_path = args.filters
@@ -38,6 +40,7 @@ def main() -> None:
         af2_model_idx=args.af2_model,
         folding_model=args.folding_model,
         protenix_model_name=args.protenix_model,
+        force_rosetta=args.force_rosetta,
     )
 
 if __name__ == "__main__":

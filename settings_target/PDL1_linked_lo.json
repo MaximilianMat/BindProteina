@@ -14,7 +14,7 @@
         "autoencoder_path": "/nfs/students/matscher/laproteina_checkpoints/AE3_motif.ckpt",
         "laproteina_mode": "all_atom",
         "inference_config": "inference_motif_idx_aa",
-        "n_samples": 10000,
+        "n_samples": 150,
         "batch_size": 2,
         "n_linker_starting_points": 1,
         "binder_length_range": [

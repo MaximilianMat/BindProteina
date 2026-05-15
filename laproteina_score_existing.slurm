@@ -110,7 +110,7 @@ def _repair_single_chain_by_target_len(lines, tgt_len):
         return None
     return repaired
 
-pdbs = sorted(in_dir.glob("*.pdb"))
+pdbs = sorted(in_dir.rglob("*.pdb"))
 kept_native = 0
 kept_repaired = 0
 dropped = 0

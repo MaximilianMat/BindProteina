@@ -41,13 +41,21 @@ def get_pyrosetta_init_cmd(dalphaball_path: str, num_threads: int = None) -> str
     return cmd
 
 # Rosetta interface scores
-def score_interface(pdb_file, binder_chain="B"):
+def score_interface(pdb_file, target_chains="A", binder_chains="B"):
+    """
+    Score the interface between target and binder chains.
+
+    Args:
+        target_chains: Chain ID(s) forming the target, e.g. "A" or "AC".
+        binder_chains: Chain ID(s) forming the binder, e.g. "B" or "BC".
+                       Multi-chain binders are supported (e.g. antibody H+L = "BC").
+    """
     # load pose
     pose = pr.pose_from_pdb(pdb_file)
 
     # analyze interface statistics
     iam = InterfaceAnalyzerMover()
-    iam.set_interface("A_B")
+    iam.set_interface(f"{target_chains}_{binder_chains}")
     scorefxn = pr.get_fa_scorefxn()
     iam.set_scorefunction(scorefxn)
     iam.set_compute_packstat(True)
@@ -61,17 +69,13 @@ def score_interface(pdb_file, binder_chain="B"):
     # Initialize dictionary with all amino acids
     interface_AA = {aa: 0 for aa in 'ACDEFGHIKLMNPQRSTVWY'}
 
-    # Initialize list to store PDB residue IDs at the interface
-    interface_residues_set = hotspot_residues(pdb_file, binder_chain)
+    # Hotspot residues: iterate over each binder chain character
     interface_residues_pdb_ids = []
-    
-    # Iterate over the interface residues
-    for pdb_res_num, aa_type in interface_residues_set.items():
-        # Increase the count for this amino acid type
-        interface_AA[aa_type] += 1
-
-        # Append the binder_chain and the PDB residue number to the list
-        interface_residues_pdb_ids.append(f"{binder_chain}{pdb_res_num}")
+    for chain_ch in binder_chains:
+        chain_hotspots = hotspot_residues(pdb_file, chain_ch)
+        for pdb_res_num, aa_type in chain_hotspots.items():
+            interface_AA[aa_type] += 1
+            interface_residues_pdb_ids.append(f"{chain_ch}{pdb_res_num}")
 
     # count interface residues
     interface_nres = len(interface_residues_pdb_ids)
@@ -98,25 +102,23 @@ def score_interface(pdb_file, binder_chain="B"):
     buns_filter = XmlObjects.static_get_filter('<BuriedUnsatHbonds report_all_heavy_atom_unsats="true" scorefxn="scorefxn" ignore_surface_res="false" use_ddG_style="true" dalphaball_sasa="1" probe_radius="1.1" burial_cutoff_apo="0.2" confidence="0" />')
     interface_delta_unsat_hbonds = buns_filter.report_sm(pose)
     
-    # Get target chain (A) interface residues using PyRosetta
+    # Get target chain interface residues using PyRosetta
     # Calculate interface residues based on distance between target and binder chains
     target_interface_residues = []
     try:
         pdb_info = pose.pdb_info()
-        target_chain_id = 'A'
-        binder_chain_id = binder_chain
-        
-        # Get residue indices for binder chain
+
+        # Get residue indices for binder chain(s)
         binder_residues = []
         for res_num in range(1, pose.size() + 1):
-            if pdb_info.chain(res_num) == binder_chain_id:
+            if pdb_info.chain(res_num) in binder_chains:
                 binder_residues.append(res_num)
-        
+
         if not binder_residues:
             target_interface_residues_str = ""
         else:
-            # Create a selector for binder chain residues
-            binder_selector = ChainSelector(binder_chain_id)
+            # Create a selector for binder chain residues (comma-separated for multi-chain)
+            binder_selector = ChainSelector(",".join(binder_chains))
             
             # Use NeighborhoodResidueSelector to find target residues near binder
             # This identifies residues within distance cutoff of the binder chain
@@ -128,10 +130,10 @@ def score_interface(pdb_file, binder_chain="B"):
             interface_subset = neighbor_selector.apply(pose)
             interface_residue_indices = get_residues_from_subset(interface_subset)
             
-            # Filter for target chain (A) residues only
+            # Filter for target chain residues only
             for res_num in interface_residue_indices:
                 chain_id = pdb_info.chain(res_num)
-                if chain_id == target_chain_id:
+                if chain_id in target_chains:
                     pdb_res_num = pdb_info.number(res_num)
                     target_interface_residues.append(pdb_res_num)
             
@@ -151,8 +153,8 @@ def score_interface(pdb_file, binder_chain="B"):
         interface_hbond_percentage = None
         interface_bunsch_percentage = None
 
-    # calculate binder energy score
-    chain_design = ChainSelector(binder_chain)
+    # calculate binder energy score (across all binder chains)
+    chain_design = ChainSelector(",".join(binder_chains))
     tem = pr.rosetta.core.simple_metrics.metrics.TotalEnergyMetric()
     tem.set_scorefunction(scorefxn)
     tem.set_residue_selector(chain_design)
@@ -168,8 +170,20 @@ def score_interface(pdb_file, binder_chain="B"):
     else:
         interface_binder_fraction = 0
 
-    # calculate surface hydrophobicity
-    binder_pose = {pose.pdb_info().chain(pose.conformation().chain_begin(i)): p for i, p in zip(range(1, pose.num_chains()+1), pose.split_by_chain())}[binder_chain]
+    # calculate surface hydrophobicity on binder (combine all binder chain subposes)
+    chain_poses = {
+        pose.pdb_info().chain(pose.conformation().chain_begin(i)): p
+        for i, p in zip(range(1, pose.num_chains() + 1), pose.split_by_chain())
+    }
+    binder_pose = None
+    for ch in binder_chains:
+        ch_pose = chain_poses.get(ch)
+        if ch_pose is None:
+            continue
+        if binder_pose is None:
+            binder_pose = ch_pose.clone()
+        else:
+            pr.rosetta.core.pose.append_pose_to_pose(binder_pose, ch_pose)
 
     layer_sel = pr.rosetta.core.select.residue_selector.LayerSelector()
     layer_sel.set_layers(pick_core = False, pick_boundary = False, pick_surface = True)
