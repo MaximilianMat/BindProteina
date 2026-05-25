@@ -157,86 +157,102 @@ def score_complexes(
     folding_rows = []
     folding_outputs = []
 
-    if folding_model == "af2":
-        from colabdesign import mk_afdesign_model, clear_mem
-        from pipeline.scoring.folding import run_af2_refolding
+    folding_csv = out_path / f"{folding_model}_prescoring_results.csv"
+    skip_folding = False
+    
+    if folding_csv.exists():
+        existing_df = pd.read_csv(folding_csv)
+        if len(existing_df) == len(pdbs) and (existing_df["status"] == "predicted").all():
+            print(f"Found complete pre-scoring CSV with {len(existing_df)} designs, skipping folding stage.")
+            folding_rows = existing_df.to_dict("records")
+            for row in folding_rows:
+                if row.get("status") == "predicted":
+                    design_name = row["design_name"]
+                    cands = list(predictions_dir.rglob(f"{design_name}_*.pdb"))
+                    if cands:
+                        folding_outputs.append((design_name, str(cands[0])))
+            skip_folding = True
 
-        clear_mem()
-        complex_model = mk_afdesign_model(
-            protocol="binder",
-            num_recycles=1,
-            use_multimer=True,
-            use_initial_guess=False,
-            use_initial_atom_pos=False,
-        )
-
-        if af2_model_idx is None:
-            af2_model_num = random.randint(1, 5)
-        else:
-            af2_model_num = max(1, min(5, int(af2_model_idx)))
-        print(f"Folding model: AF2 (model {af2_model_num})")
-
-        for pdb in tqdm(pdbs, desc="AF2 Re-folding"):
-            design_name = pdb.stem
-            try:
-                folded_pdb, metrics = run_af2_refolding(
-                    pdb_path=str(pdb),
-                    design_name=design_name,
-                    output_dir=predictions_dir,
-                    complex_model=complex_model,
-                    af2_model_num=af2_model_num,
-                )
-                if folded_pdb is None:
-                    folding_rows.append({"design_name": design_name, "status": "failed", "reason": metrics.get("error", "Unknown error")})
-                    continue
-
-                metrics["folding_model"] = f"af2_model{af2_model_num}"
-                _add_sc_rmsd(str(pdb), folded_pdb, metrics)
-
-                row = {"design_name": design_name, "status": "predicted", **metrics}
-                folding_rows.append(row)
-                folding_outputs.append((design_name, folded_pdb))
-            except Exception as e:
-                folding_rows.append({"design_name": design_name, "status": "failed", "reason": str(e)})
-
-    elif folding_model == "protenix":
-        from pipeline.scoring.folding_protenix import run_protenix_refolding_batch
-
-        print(f"Folding model: Protenix ({protenix_model_name}) - Batch Mode")
-        
-        pdb_paths_str = [str(p) for p in pdbs]
-        try:
-            batch_results = run_protenix_refolding_batch(
-                pdb_paths=pdb_paths_str,
-                output_dir=predictions_dir,
-                model_name=protenix_model_name,
-                target_msa_path=target_msa,
-                target_template_path=resolved_template,
-                fetch_all_msas=fetch_all_msas,
+    if not skip_folding:
+        if folding_model == "af2":
+            from colabdesign import mk_afdesign_model, clear_mem
+            from pipeline.scoring.folding import run_af2_refolding
+    
+            clear_mem()
+            complex_model = mk_afdesign_model(
+                protocol="binder",
+                num_recycles=1,
+                use_multimer=True,
+                use_initial_guess=False,
+                use_initial_atom_pos=False,
             )
+    
+            if af2_model_idx is None:
+                af2_model_num = random.randint(1, 5)
+            else:
+                af2_model_num = max(1, min(5, int(af2_model_idx)))
+            print(f"Folding model: AF2 (model {af2_model_num})")
+    
+            for pdb in tqdm(pdbs, desc="AF2 Re-folding"):
+                design_name = pdb.stem
+                try:
+                    folded_pdb, metrics = run_af2_refolding(
+                        pdb_path=str(pdb),
+                        design_name=design_name,
+                        output_dir=predictions_dir,
+                        complex_model=complex_model,
+                        af2_model_num=af2_model_num,
+                    )
+                    if folded_pdb is None:
+                        folding_rows.append({"design_name": design_name, "status": "failed", "reason": metrics.get("error", "Unknown error")})
+                        continue
+    
+                    metrics["folding_model"] = f"af2_model{af2_model_num}"
+                    _add_sc_rmsd(str(pdb), folded_pdb, metrics)
+    
+                    row = {"design_name": design_name, "status": "predicted", **metrics}
+                    folding_rows.append(row)
+                    folding_outputs.append((design_name, folded_pdb))
+                except Exception as e:
+                    folding_rows.append({"design_name": design_name, "status": "failed", "reason": str(e)})
+    
+        elif folding_model == "protenix":
+            from pipeline.scoring.folding_protenix import run_protenix_refolding_batch
+    
+            print(f"Folding model: Protenix ({protenix_model_name}) - Batch Mode")
             
-            for design_name, folded_pdb, metrics in batch_results:
-                if folded_pdb is None:
-                    folding_rows.append({"design_name": design_name, "status": "failed", "reason": metrics.get("error", "Unknown error")})
-                    continue
+            pdb_paths_str = [str(p) for p in pdbs]
+            try:
+                batch_results = run_protenix_refolding_batch(
+                    pdb_paths=pdb_paths_str,
+                    output_dir=predictions_dir,
+                    model_name=protenix_model_name,
+                    target_msa_path=target_msa,
+                    target_template_path=resolved_template,
+                    fetch_all_msas=fetch_all_msas,
+                )
                 
-                orig_pdb = next((p for p in pdbs if p.stem == design_name), None)
-                if orig_pdb:
-                    _add_sc_rmsd(str(orig_pdb), folded_pdb, metrics)
-                
-                row = {"design_name": design_name, "status": "predicted", **metrics}
-                folding_rows.append(row)
-                folding_outputs.append((design_name, folded_pdb))
-                
-        except Exception as e:
-            print(f"Batch prediction exception: {e}")
-            for p in pdbs:
-                folding_rows.append({"design_name": p.stem, "status": "failed", "reason": str(e)})
-    else:
-        raise ValueError(f"Unknown folding_model: {folding_model!r}. Use 'af2' or 'protenix'.")
+                for design_name, folded_pdb, metrics in batch_results:
+                    if folded_pdb is None:
+                        folding_rows.append({"design_name": design_name, "status": "failed", "reason": metrics.get("error", "Unknown error")})
+                        continue
+                    
+                    orig_pdb = next((p for p in pdbs if p.stem == design_name), None)
+                    if orig_pdb:
+                        _add_sc_rmsd(str(orig_pdb), folded_pdb, metrics)
+                    
+                    row = {"design_name": design_name, "status": "predicted", **metrics}
+                    folding_rows.append(row)
+                    folding_outputs.append((design_name, folded_pdb))
+                    
+            except Exception as e:
+                print(f"Batch prediction exception: {e}")
+                for p in pdbs:
+                    folding_rows.append({"design_name": p.stem, "status": "failed", "reason": str(e)})
+        else:
+            raise ValueError(f"Unknown folding_model: {folding_model!r}. Use 'af2' or 'protenix'.")
 
     folding_df = pd.DataFrame(folding_rows)
-    folding_csv = out_path / f"{folding_model}_prescoring_results.csv"
     folding_df.to_csv(folding_csv, index=False)
     print(f"Saved {folding_model} pre-scoring to {folding_csv}")
 
@@ -354,7 +370,24 @@ def score_complexes(
 
     final_rows = []
     pyrosetta_passing = 0
+    
+    partial_csv = out_path / "scoring_summary_partial.csv"
+    existing_scored = set()
+    if partial_csv.exists():
+        try:
+            existing_df = pd.read_csv(partial_csv)
+            existing_scored = set(existing_df["design_name"])
+            final_rows = existing_df.to_dict("records")
+            for row in final_rows:
+                if row.get("pyrosetta_filter_pass", False):
+                    pyrosetta_passing += 1
+            print(f"Resuming PyRosetta: {len(existing_scored)} designs already scored")
+        except Exception as e:
+            print(f"Warning: could not read partial CSV: {e}")
+
     for design_name, folded_pdb in tqdm(passing, desc="PyRosetta Scoring"):
+        if design_name in existing_scored:
+            continue
         try:
             interface_scores = run_pyrosetta_scoring(
                 af2_pdb=folded_pdb,
@@ -410,10 +443,15 @@ def score_complexes(
             )
         except Exception as e:
             final_rows.append({"design_name": design_name, "status": "rosetta_failed", "reason": str(e), "pyrosetta_filter_pass": False})
+            
+        if len(final_rows) % 10 == 0:
+            pd.DataFrame(final_rows).to_csv(partial_csv, index=False)
 
     final_df = pd.DataFrame(final_rows)
     summary_csv = out_path / "scoring_summary.csv"
     final_df.to_csv(summary_csv, index=False)
+    if partial_csv.exists():
+        partial_csv.unlink()
     
     # Print statistical summary for PyRosetta scoring
     total_pyrosetta = len(final_rows) # those that failed rosetta will be here with status rosetta_failed
@@ -549,8 +587,28 @@ def score_from_protenix_json(
     predictions_dir.mkdir(parents=True, exist_ok=True)
     start_folding = time.time()
 
-    print(f"Folding model: Protenix ({protenix_model_name}) — JSON Batch Mode")
-    batch_results = run_protenix_from_json_payload(
+    folding_csv = out_path / "protenix_prescoring_results.csv"
+    folding_rows = []
+    folding_outputs = []
+    skip_folding = False
+    
+    if folding_csv.exists():
+        existing_df = pd.read_csv(folding_csv)
+        if len(existing_df) == len(entries) and (existing_df["status"] == "predicted").all():
+            print(f"Found complete pre-scoring CSV with {len(existing_df)} complexes, skipping folding stage.")
+            folding_rows = existing_df.to_dict("records")
+            for row in folding_rows:
+                if row.get("status") == "predicted":
+                    design_name = row["design_name"]
+                    binder_chains = row.get("binder_chains", "B")
+                    cands = list(predictions_dir.rglob(f"{design_name}_protenix.pdb"))
+                    if cands:
+                        folding_outputs.append((design_name, str(cands[0]), binder_chains))
+            skip_folding = True
+
+    if not skip_folding:
+        print(f"Folding model: Protenix ({protenix_model_name}) — JSON Batch Mode")
+        batch_results = run_protenix_from_json_payload(
         entries=entries,
         output_dir=predictions_dir,
         model_name=protenix_model_name,
@@ -561,23 +619,20 @@ def score_from_protenix_json(
         fetch_all_msas=fetch_all_msas,
     )
 
-    folding_rows = []
-    folding_outputs = []
-    for design_name, folded_pdb, metrics in batch_results:
-        if folded_pdb is None:
-            folding_rows.append({
-                "design_name": design_name,
-                "status": "failed",
-                "reason": metrics.get("error", "Unknown error"),
-            })
-        else:
-            folding_rows.append({"design_name": design_name, "status": "predicted", **metrics})
-            folding_outputs.append((design_name, folded_pdb, metrics.get("binder_chains", "B")))
-
-    folding_df = pd.DataFrame(folding_rows)
-    folding_csv = out_path / "protenix_prescoring_results.csv"
-    folding_df.to_csv(folding_csv, index=False)
-    print(f"Saved Protenix pre-scoring to {folding_csv}")
+        for design_name, folded_pdb, metrics in batch_results:
+            if folded_pdb is None:
+                folding_rows.append({
+                    "design_name": design_name,
+                    "status": "failed",
+                    "reason": metrics.get("error", "Unknown error"),
+                })
+            else:
+                folding_rows.append({"design_name": design_name, "status": "predicted", **metrics})
+                folding_outputs.append((design_name, folded_pdb, metrics.get("binder_chains", "B")))
+    
+        folding_df = pd.DataFrame(folding_rows)
+        folding_df.to_csv(folding_csv, index=False)
+        print(f"Saved Protenix pre-scoring to {folding_csv}")
     elapsed_folding = time.time() - start_folding
 
     # ── Folding filters ────────────────────────────────────────────────
@@ -667,7 +722,23 @@ def score_from_protenix_json(
     final_rows = []
     pyrosetta_passing = 0
 
+    partial_csv = out_path / "scoring_summary_partial.csv"
+    existing_scored = set()
+    if partial_csv.exists():
+        try:
+            existing_df = pd.read_csv(partial_csv)
+            existing_scored = set(existing_df["design_name"])
+            final_rows = existing_df.to_dict("records")
+            for row in final_rows:
+                if row.get("pyrosetta_filter_pass", False):
+                    pyrosetta_passing += 1
+            print(f"Resuming PyRosetta: {len(existing_scored)} complexes already scored")
+        except Exception as e:
+            print(f"Warning: could not read partial CSV: {e}")
+
     for design_name, folded_pdb, binder_chains in tqdm(passing, desc="PyRosetta Scoring"):
+        if design_name in existing_scored:
+            continue
         try:
             interface_scores = run_pyrosetta_scoring(
                 af2_pdb=folded_pdb,
@@ -720,10 +791,15 @@ def score_from_protenix_json(
                 "reason": str(e),
                 "pyrosetta_filter_pass": False,
             })
+            
+        if len(final_rows) % 10 == 0:
+            pd.DataFrame(final_rows).to_csv(partial_csv, index=False)
 
     final_df = pd.DataFrame(final_rows)
     summary_csv = out_path / "scoring_summary.csv"
     final_df.to_csv(summary_csv, index=False)
+    if partial_csv.exists():
+        partial_csv.unlink()
 
     elapsed_pyrosetta = time.time() - start_pyrosetta
     elapsed_total = time.time() - start_total

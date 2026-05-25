@@ -346,6 +346,73 @@ def run_protenix_refolding(
     return protenix_pdb_path, metrics
 
 
+def _get_completed_designs(work_dir, payload: list, job_info: dict, model_name: str):
+    import json
+    
+    completed_results = []
+    remaining = []
+    
+    for cp in payload:
+        dn = cp["name"]
+        pdb_path = work_dir / f"{dn}_protenix.pdb"
+        meta_path = work_dir / f"{dn}_protenix_meta.json"
+        
+        if pdb_path.exists() and meta_path.exists():
+            try:
+                with open(meta_path, "r") as f:
+                    metrics = json.load(f)
+                completed_results.append((dn, str(pdb_path), metrics))
+                continue
+            except Exception:
+                pass
+        remaining.append(cp)
+        
+    if not remaining:
+        return completed_results, remaining
+        
+    chunk_dirs = [d for d in work_dir.glob("chunk_*") if d.is_dir()]
+    if chunk_dirs:
+        design_to_chunk = {}
+        for cdir in chunk_dirs:
+            cjson = cdir / "chunk_input.json"
+            if cjson.exists():
+                try:
+                    with open(cjson, "r") as f:
+                        for item in json.load(f):
+                            design_to_chunk[item["name"]] = cdir
+                except Exception:
+                    pass
+                    
+        still_remaining = []
+        for cp in remaining:
+            dn = cp["name"]
+            cdir = design_to_chunk.get(dn)
+            found = False
+            if cdir:
+                jinfo = job_info.get(dn)
+                if jinfo and "error" not in jinfo:
+                    best_cif, best_data = _pick_best_sample(cdir, dn)
+                    if best_cif is not None:
+                        pdb_path = work_dir / f"{dn}_protenix.pdb"
+                        meta_path = work_dir / f"{dn}_protenix_meta.json"
+                        try:
+                            _cif_to_pdb(str(best_cif), str(pdb_path))
+                        except Exception:
+                            pass
+                        metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
+                        if "binder_chains" in jinfo:
+                            metrics["binder_chains"] = jinfo["binder_chains"]
+                        with open(meta_path, "w") as f:
+                            json.dump(metrics, f)
+                        completed_results.append((dn, str(pdb_path), metrics))
+                        found = True
+            if not found:
+                still_remaining.append(cp)
+        remaining = still_remaining
+        
+    return completed_results, remaining
+
+
 def run_protenix_refolding_batch(
     pdb_paths: List[str],
     output_dir: Path,
@@ -353,7 +420,7 @@ def run_protenix_refolding_batch(
     seed: int = 42,
     target_msa_path: Optional[str] = None,
     target_template_path: Optional[str] = None,
-    chunk_size: int = 40,
+    chunk_size: int = 35,
     fetch_all_msas: bool = False,
 ) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
     """
@@ -478,27 +545,33 @@ def run_protenix_refolding_batch(
             results.append((dnn, None, {"error": err}))
         return results
 
-    # Save full payload for reference
     with open(work_dir / "batch_input.json", "w") as f:
         json.dump(payload, f, indent=2)
 
     protenix_cmd = _resolve_protenix_cmd()
 
-    # -----------------------------------------------------------------------
-    # Chunk + run
-    # -----------------------------------------------------------------------
-    n_chunks = (len(payload) + chunk_size - 1) // chunk_size
-    logger.info(
-        f"Protenix Batch: {len(payload)} designs → {n_chunks} chunk(s) of ≤{chunk_size}"
-    )
+    completed_results, missing_payload = _get_completed_designs(work_dir, payload, job_info, model_name)
+    results.extend(completed_results)
+
+    if not missing_payload:
+        logger.info(f"Protenix batch complete: All {len(payload)} designs already processed.")
+        return results
+
+    n_chunks = (len(missing_payload) + chunk_size - 1) // chunk_size
+    logger.info(f"Protenix Batch: {len(missing_payload)} missing designs → {n_chunks} chunk(s) of ≤{chunk_size}")
+
+    existing_chunks = [int(d.name.split('_')[1]) for d in work_dir.glob("chunk_*") if d.is_dir() and d.name.split('_')[1].isdigit()]
+    next_chunk_idx = max(existing_chunks) + 1 if existing_chunks else 0
 
     pbar = tqdm(total=len(payload), desc="Protenix Batch Prediction", unit="design")
+    pbar.update(len(completed_results))
     global_start = time.time()
 
-    for chunk_idx in range(n_chunks):
-        chunk_start = chunk_idx * chunk_size
-        chunk_end = min(chunk_start + chunk_size, len(payload))
-        chunk_payload = payload[chunk_start:chunk_end]
+    for i in range(n_chunks):
+        chunk_idx = next_chunk_idx + i
+        chunk_start = i * chunk_size
+        chunk_end = min(chunk_start + chunk_size, len(missing_payload))
+        chunk_payload = missing_payload[chunk_start:chunk_end]
 
         chunk_dir = work_dir / f"chunk_{chunk_idx:04d}"
         chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -513,125 +586,57 @@ def run_protenix_refolding_batch(
             "-o", str(chunk_dir),
             "-n", model_name,
             "--seeds", str(seed),
-            "--use_msa", "true",       # Enable MSA features
+            "--use_msa", "true",
             "--use_template", "true" if resolved_template_path else "false",
             "--enable_cache", "true",
         ]
         
-        if chunk_idx == 0:
+        if i == 0:
             logger.info(f"Protenix command: {' '.join(cmd)}")
 
         chunk_start_time = time.time()
-        timeout_per_chunk = len(chunk_payload) * 600  # 10 min per design
-
-        completed_in_chunk: set = set()
-
+        
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if process.returncode != 0:
+                logger.error(f"Chunk {chunk_idx} exited {process.returncode}. Stderr: {process.stderr[:500]}")
 
-            while True:
-                retcode = process.poll()
-
-                current_cifs = list(chunk_dir.rglob("*.cif"))
-                for cp in chunk_payload:
-                    dn = cp["name"]
-                    if dn in completed_in_chunk:
-                        continue
-                    if any(c.name.startswith(f"{dn}_sample_") or c.parent.name == dn for c in current_cifs):
-                        completed_in_chunk.add(dn)
-                        pbar.update(1)
-
-                if retcode is not None:
-                    break
-
-                if time.time() - chunk_start_time > timeout_per_chunk:
-                    process.terminate()
-                    logger.error(f"Chunk {chunk_idx} timed out after {timeout_per_chunk}s")
-                    for cp in chunk_payload:
-                        if cp["name"] not in completed_in_chunk:
-                            results.append((cp["name"], None, {"error": f"Chunk {chunk_idx} timed out"}))
-                    break
-
-                time.sleep(2.0)
-
-            # Final sweep after process exits to catch any remaining outputs
-            if retcode is not None:
-                remaining_cifs = list(chunk_dir.rglob("*.cif"))
-                for cp in chunk_payload:
-                    dn = cp["name"]
-                    if dn not in completed_in_chunk:
-                        if any(
-                            c.name.startswith(f"{dn}_") or c.parent.name == dn
-                            for c in remaining_cifs
-                        ):
-                            completed_in_chunk.add(dn)
-                            pbar.update(1)
-
-                _, stderr = process.communicate()
-                if retcode != 0:
-                    logger.error(f"Chunk {chunk_idx} exited {retcode}. Stderr: {stderr[:500]}")
-
-            chunk_elapsed = time.time() - chunk_start_time
-            logger.info(
-                f"Chunk {chunk_idx+1}/{n_chunks}: "
-                f"{len(completed_in_chunk)}/{len(chunk_payload)} designs in {chunk_elapsed:.1f}s"
-            )
-
-        except FileNotFoundError:
-            pbar.close()
-            err = "protenix CLI not found"
             for cp in chunk_payload:
-                results.append((cp["name"], None, {"error": err}))
-            for ri in range(chunk_idx + 1, n_chunks):
-                rs, re = ri * chunk_size, min((ri + 1) * chunk_size, len(payload))
-                for cp in payload[rs:re]:
-                    results.append((cp["name"], None, {"error": err}))
-            return results
+                design_name = cp["name"]
+                jinfo = job_info.get(design_name)
+                
+                best_cif, best_data = _pick_best_sample(chunk_dir, design_name)
+                if best_cif is None:
+                    results.append((design_name, None, {"error": "No output produced or protenix failed"}))
+                else:
+                    protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
+                    meta_path = work_dir / f"{design_name}_protenix_meta.json"
+                    try:
+                        _cif_to_pdb(str(best_cif), protenix_pdb_path)
+                    except Exception:
+                        pass
+                    
+                    metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
+                    if "binder_chains" in jinfo:
+                        metrics["binder_chains"] = jinfo["binder_chains"]
+                        
+                    with open(meta_path, "w") as f:
+                        json.dump(metrics, f)
+                        
+                    results.append((design_name, protenix_pdb_path, metrics))
+                    
+                pbar.update(1)
+                
+            chunk_elapsed = time.time() - chunk_start_time
+            logger.info(f"Chunk {i+1}/{n_chunks}: {len(chunk_payload)} designs in {chunk_elapsed:.1f}s")
+
         except Exception as e:
             err = f"Protenix chunk {chunk_idx} exception: {e}"
             logger.error(err)
             for cp in chunk_payload:
-                if cp["name"] not in completed_in_chunk:
-                    results.append((cp["name"], None, {"error": err}))
-            continue
-
-        # -------------------------------------------------------------------
-        # Parse outputs for this chunk
-        # -------------------------------------------------------------------
-        already_reported = {r[0] for r in results}
-        for cp in chunk_payload:
-            design_name = cp["name"]
-            if design_name in already_reported:
-                continue
-
-            if design_name not in completed_in_chunk:
-                results.append((design_name, None, {"error": "No output produced"}))
-                continue
-
-            jinfo = job_info.get(design_name)
-            if not jinfo or "error" in jinfo:
-                results.append((design_name, None, {"error": (jinfo or {}).get("error", "Unknown")}))
-                continue
-
-            best_cif, best_data = _pick_best_sample(chunk_dir, design_name)
-            if best_cif is None:
-                results.append((design_name, None, {"error": "No output cif found for this design"}))
-                continue
-
-            protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
-            try:
-                _cif_to_pdb(str(best_cif), protenix_pdb_path)
-            except Exception:
-                pass
-
-            metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
-            results.append((design_name, protenix_pdb_path, metrics))
-
+                results.append((cp["name"], None, {"error": err}))
+                pbar.update(1)
+                
     pbar.close()
     n_ok = sum(1 for r in results if r[1] is not None)
     total_elapsed = time.time() - global_start
@@ -680,10 +685,8 @@ def run_protenix_from_json_payload(
         s_dir = msa_cache_dir / s_hash
         if not (s_dir / "non_pairing.a3m").exists():
             return generate_target_msa_dir(seq, s_dir)
-        # Find already generated msa_dir inside the hash dir
         cands = list(s_dir.rglob("non_pairing.a3m"))
         return str(cands[0].parent.absolute())
-    binder_msa_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_msa_path: Optional[str] = None
     if target_msa_path:
@@ -714,7 +717,6 @@ def run_protenix_from_json_payload(
 
         chains = copy.deepcopy(raw_chains)
 
-        # Extract sequences and strip id fields (so Protenix assigns A, B, C... in order)
         chain_seqs: List[str] = []
         for chain_entry in chains:
             pc = chain_entry.get("proteinChain", {})
@@ -734,23 +736,19 @@ def run_protenix_from_json_payload(
         binder_seq_combined = "/".join(binder_seqs)
         binder_len_total = sum(len(s) for s in binder_seqs)
 
-        # Build the payload entry, preserving all extra fields (N_sample, N_cycle, etc.)
         new_entry = copy.deepcopy(entry)
         new_entry["name"] = design_name
         new_entry["sequences"] = chains
         new_entry["covalent_bonds"] = entry.get("covalent_bonds", [])
         
-        # Attach MSAs to chains
         for i, chain_entry in enumerate(new_entry["sequences"]):
             pc = chain_entry["proteinChain"]
             seq = pc["sequence"]
             
-            # Skip if already has MSAs in the input JSON
             if "pairedMsaPath" in pc and "unpairedMsaPath" in pc:
                 continue
 
             if i == 0:
-                # Target chain
                 if resolved_msa_path:
                     _attach_msa_to_chain(pc, resolved_msa_path)
                 elif fetch_all_msas:
@@ -758,11 +756,9 @@ def run_protenix_from_json_payload(
                 if resolved_template_path:
                     pc["templatesPath"] = resolved_template_path
             else:
-                # Binder chains
                 if fetch_all_msas:
                     _attach_msa_to_chain(pc, get_msa_for_seq(seq))
                 else:
-                    # Default to dummy for de novo binders
                     a3m_path = binder_msa_dir / f"{design_name}_chain{i}.a3m"
                     if not a3m_path.exists():
                         a3m_path.write_text(f">query\n{seq}\n")
@@ -787,20 +783,34 @@ def run_protenix_from_json_payload(
         json.dump(payload, f, indent=2)
 
     protenix_cmd = _resolve_protenix_cmd()
-    n_chunks = (len(payload) + chunk_size - 1) // chunk_size
-    logger.info(f"Protenix JSON Batch: {len(payload)} complexes → {n_chunks} chunk(s) of ≤{chunk_size}")
+
+    completed_results, missing_payload = _get_completed_designs(work_dir, payload, job_info, model_name)
+    results.extend(completed_results)
+
+    if not missing_payload:
+        logger.info(f"Protenix JSON batch complete: All {len(payload)} complexes already processed.")
+        return results
+
+    n_chunks = (len(missing_payload) + chunk_size - 1) // chunk_size
+    logger.info(f"Protenix JSON Batch: {len(missing_payload)} missing complexes → {n_chunks} chunk(s) of ≤{chunk_size}")
+
+    existing_chunks = [int(d.name.split('_')[1]) for d in work_dir.glob("chunk_*") if d.is_dir() and d.name.split('_')[1].isdigit()]
+    next_chunk_idx = max(existing_chunks) + 1 if existing_chunks else 0
 
     pbar = tqdm(total=len(payload), desc="Protenix JSON Batch", unit="complex")
+    pbar.update(len(completed_results))
     global_start = time.time()
 
-    for chunk_idx in range(n_chunks):
-        chunk_start_idx = chunk_idx * chunk_size
-        chunk_end_idx = min(chunk_start_idx + chunk_size, len(payload))
-        chunk_payload = payload[chunk_start_idx:chunk_end_idx]
+    for i in range(n_chunks):
+        chunk_idx = next_chunk_idx + i
+        chunk_start_idx = i * chunk_size
+        chunk_end_idx = min(chunk_start_idx + chunk_size, len(missing_payload))
+        chunk_payload = missing_payload[chunk_start_idx:chunk_end_idx]
 
         chunk_dir = work_dir / f"chunk_{chunk_idx:04d}"
         chunk_dir.mkdir(parents=True, exist_ok=True)
         chunk_json = chunk_dir / "chunk_input.json"
+
         with open(chunk_json, "w") as f:
             json.dump(chunk_payload, f, indent=2)
 
@@ -810,100 +820,52 @@ def run_protenix_from_json_payload(
             "-o", str(chunk_dir),
             "-n", model_name,
             "--seeds", str(seed),
-            "--use_msa", "true",       # Enable MSA features (skipped for chains with paths)
+            "--use_msa", "true",
             "--use_template", "true" if resolved_template_path else "false",
             "--enable_cache", "true",
         ]
         
-        if chunk_idx == 0:
+        if i == 0:
             logger.info(f"Protenix command: {' '.join(cmd)}")
 
-        chunk_t0 = time.time()
-        timeout_per_chunk = len(chunk_payload) * 600
-        completed_in_chunk: set = set()
-
+        chunk_start_time = time.time()
+        
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if process.returncode != 0:
+                logger.error(f"Chunk {chunk_idx} exited {process.returncode}. Stderr: {process.stderr[:500]}")
 
-            while True:
-                retcode = process.poll()
-                current_cifs = list(chunk_dir.rglob("*.cif"))
-                for cp in chunk_payload:
-                    dn = cp["name"]
-                    if dn in completed_in_chunk:
-                        continue
-                    if any(c.name.startswith(f"{dn}_sample_") or c.parent.name == dn for c in current_cifs):
-                        completed_in_chunk.add(dn)
-                        pbar.update(1)
-                if retcode is not None:
-                    break
-                if time.time() - chunk_t0 > timeout_per_chunk:
-                    process.terminate()
-                    for cp in chunk_payload:
-                        if cp["name"] not in completed_in_chunk:
-                            results.append((cp["name"], None, {"error": f"Chunk {chunk_idx} timed out"}))
-                    break
-                time.sleep(2.0)
-
-            if retcode is not None:
-                for cp in chunk_payload:
-                    dn = cp["name"]
-                    if dn not in completed_in_chunk:
-                        if any(c.name.startswith(f"{dn}_") or c.parent.name == dn
-                               for c in chunk_dir.rglob("*.cif")):
-                            completed_in_chunk.add(dn)
-                            pbar.update(1)
-                _, stderr = process.communicate()
-                if retcode != 0:
-                    logger.error(f"Chunk {chunk_idx} exited {retcode}. Stderr: {stderr[:500]}")
-
-            logger.info(
-                f"Chunk {chunk_idx+1}/{n_chunks}: "
-                f"{len(completed_in_chunk)}/{len(chunk_payload)} in {time.time()-chunk_t0:.1f}s"
-            )
-
-        except FileNotFoundError:
-            pbar.close()
-            err = "protenix CLI not found"
             for cp in chunk_payload:
-                results.append((cp["name"], None, {"error": err}))
-            for ri in range(chunk_idx + 1, n_chunks):
-                rs, re = ri * chunk_size, min((ri + 1) * chunk_size, len(payload))
-                for cp in payload[rs:re]:
-                    results.append((cp["name"], None, {"error": err}))
-            return results
+                design_name = cp["name"]
+                jinfo = job_info.get(design_name)
+                
+                best_cif, best_data = _pick_best_sample(chunk_dir, design_name)
+                if best_cif is None:
+                    results.append((design_name, None, {"error": "No output cif found"}))
+                else:
+                    protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
+                    meta_path = work_dir / f"{design_name}_protenix_meta.json"
+                    try:
+                        _cif_to_pdb(str(best_cif), protenix_pdb_path)
+                    except Exception:
+                        pass
+                    metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
+                    metrics["binder_chains"] = jinfo["binder_chains"]
+                    with open(meta_path, "w") as f:
+                        json.dump(metrics, f)
+                    results.append((design_name, protenix_pdb_path, metrics))
+                    
+                pbar.update(1)
+
+            chunk_elapsed = time.time() - chunk_start_time
+            logger.info(f"Chunk {i+1}/{n_chunks}: {len(chunk_payload)} complexes in {chunk_elapsed:.1f}s")
+
         except Exception as e:
             err = f"Protenix chunk {chunk_idx} exception: {e}"
             logger.error(err)
             for cp in chunk_payload:
-                if cp["name"] not in completed_in_chunk:
-                    results.append((cp["name"], None, {"error": err}))
-            continue
-
-        already_reported = {r[0] for r in results}
-        for cp in chunk_payload:
-            design_name = cp["name"]
-            if design_name in already_reported:
-                continue
-            if design_name not in completed_in_chunk:
-                results.append((design_name, None, {"error": "No output produced"}))
-                continue
-            jinfo = job_info.get(design_name)
-            if not jinfo or "error" in jinfo:
-                results.append((design_name, None, {"error": (jinfo or {}).get("error", "Unknown")}))
-                continue
-            best_cif, best_data = _pick_best_sample(chunk_dir, design_name)
-            if best_cif is None:
-                results.append((design_name, None, {"error": "No output cif found"}))
-                continue
-            protenix_pdb_path = str(work_dir / f"{design_name}_protenix.pdb")
-            try:
-                _cif_to_pdb(str(best_cif), protenix_pdb_path)
-            except Exception:
-                pass
-            metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
-            metrics["binder_chains"] = jinfo["binder_chains"]
-            results.append((design_name, protenix_pdb_path, metrics))
+                results.append((cp["name"], None, {"error": err}))
+                pbar.update(1)
 
     pbar.close()
     n_ok = sum(1 for r in results if r[1] is not None)
