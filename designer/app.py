@@ -43,7 +43,9 @@ from designer.placement.placer import (
 )
 from designer.placement.seeds import SEED_LABELS, SEED_TYPES, get_seed_structure
 from designer.settings.builder import (
+    batch_slurm_command,
     build_settings,
+    save_batch_manifest,
     save_settings,
     settings_to_json,
     slurm_command,
@@ -120,8 +122,15 @@ _STATE_DEFAULTS: dict = {
     "s_folding_model":     _d.get("folding_model", "af2"),
     "s_protenix_model":    _d.get("protenix_model", "protenix-v2"),
     "s_target_msa":        "",
-    "s_output_dir":        _d["default_output_dir"],
-    "s_save_dir_local":    "",
+    "s_output_dir":           _d["default_output_dir"],
+    "s_save_dir_local":       "",
+    # batch queue
+    "batch_queue":            [],
+    "s_batch_save_dir":       "",
+    "s_batch_max_concurrent": 6,
+    # placement angles
+    "s_rotation_deg":         0,
+    "s_tilt_deg":             0,
 }
 
 for key, default in _STATE_DEFAULTS.items():
@@ -258,11 +267,21 @@ with col_seed:
         custom_pdb_input = st.text_area("Paste seed PDB", height=150)
 
     rotation_deg = 0.0
+    tilt_deg = 0.0
     if seed_type != "single_gly":
         rotation_deg = st.slider(
-            "Orientation rotation (°)",
-            min_value=0, max_value=355, value=0, step=5,
-            help="Rotate the seed around the anchor→placement axis.",
+            "Spin (°) — around placement axis",
+            min_value=0, max_value=355, step=5,
+            key="s_rotation_deg",
+            help="Spins the seed around the anchor→placement direction vector.",
+        )
+        tilt_deg = st.slider(
+            "Tilt (°) — away from placement direction",
+            min_value=0, max_value=180, step=5,
+            key="s_tilt_deg",
+            help="0° = seed extends along the placement direction. "
+                 "90° = seed lies tangent to the surface. "
+                 "180° = seed points back toward the protein.",
         )
 
     n_candidates = st.number_input(
@@ -297,21 +316,22 @@ if st.button("🔬 Preview placement", use_container_width=True):
             if n_candidates == 1:
                 linked, n_seed = place_seed(
                     target, anchor_pos, direction, distance,
-                    seed_type, rotation_deg,
+                    seed_type, rotation_deg, tilt_deg,
                     custom_pdb=custom_pdb_input or None,
                 )
-                st.session_state.linked_structures = [(linked, n_seed, rotation_deg)]
+                st.session_state.linked_structures = [(linked, n_seed, rotation_deg, tilt_deg)]
             else:
                 results = generate_candidates(
                     target, anchor_pos, direction, distance,
                     seed_type, int(n_candidates),
+                    tilt_deg=tilt_deg,
                     custom_pdb=custom_pdb_input or None,
                 )
                 st.session_state.linked_structures = results
 
             # Build PDB strings for display
             pdb_strings = [
-                structure_to_pdb_string(s) for s, _, _ in st.session_state.linked_structures
+                structure_to_pdb_string(s) for s, _, _, _ in st.session_state.linked_structures
             ]
             st.session_state.linked_pdb_strings = pdb_strings
 
@@ -325,7 +345,7 @@ if st.session_state.linked_pdb_strings:
 
     if len(st.session_state.linked_pdb_strings) == 1:
         pdb_str = st.session_state.linked_pdb_strings[0]
-        linked, n_seed, rot = st.session_state.linked_structures[0]
+        linked, n_seed, rot, tilt = st.session_state.linked_structures[0]
 
         # Clash check — re-extract seed atoms from linked (residue IDs > target_length)
         tl = st.session_state.target_length
@@ -348,10 +368,10 @@ if st.session_state.linked_pdb_strings:
     else:
         st.info(f"Generated {len(st.session_state.linked_pdb_strings)} orientation candidates.")
         tab_labels = [
-            f"Rot {r:.0f}°" for _, _, r in st.session_state.linked_structures
+            f"Spin {r:.0f}° / Tilt {t:.0f}°" for _, _, r, t in st.session_state.linked_structures
         ]
         tabs = st.tabs(tab_labels)
-        for tab, (linked, n_seed, rot), pdb_str in zip(
+        for tab, (linked, n_seed, rot, tilt), pdb_str in zip(
             tabs, st.session_state.linked_structures, st.session_state.linked_pdb_strings
         ):
             with tab:
@@ -454,10 +474,163 @@ if st.session_state.s_output_dir == _d["default_output_dir"] or not st.session_s
 output_dir_cluster = st.text_input("Output dir (cluster path)", key="s_output_dir")
 
 # ---------------------------------------------------------------------------
-# ── Section 5: Output ──
+# ── Section 5: Batch Queue ──
 # ---------------------------------------------------------------------------
 
-st.header("5 · Output")
+st.header("5 · Batch Queue")
+st.caption(
+    "Accumulate multiple seed placements and submit them as a single SLURM array job. "
+    "Place seeds in Section 3, adjust settings in Section 4, then add to the queue."
+)
+
+if st.button("➕ Add current placements to batch queue", use_container_width=True):
+    _multi = len(st.session_state.linked_structures) > 1
+    _added = 0
+    for (_linked_s, _n_seed_i, _rot, _tilt), _pdb_str in zip(
+        st.session_state.linked_structures, st.session_state.linked_pdb_strings
+    ):
+        _spin_str = f"_rot{_rot:.0f}" if _multi else ""
+        _tilt_str = f"_tilt{_tilt:.0f}" if abs(_tilt) > 0.5 else ""
+        _suffix = _spin_str + _tilt_str
+        _label = f"{binder_name}{_suffix}"
+        st.session_state.batch_queue.append({
+            "label":            _label,
+            "suffix":           _suffix,
+            "base_binder_name": binder_name,
+            "base_output_dir":  output_dir_cluster,
+            "n_seed":           _n_seed_i,
+            "rotation":         _rot,
+            "tilt":             _tilt,
+            "pdb_string":       _pdb_str,
+            "settings_snapshot": {
+                "n_samples":         int(st.session_state.s_n_samples),
+                "batch_size":        int(st.session_state.s_batch_size),
+                "binder_length_min": int(st.session_state.s_binder_len_min),
+                "binder_length_max": int(st.session_state.s_binder_len_max),
+                "keep_linker_end_n": int(st.session_state.s_keep_linker_end_n),
+                "laproteina_mode":   st.session_state.s_laproteina_mode,
+                "rosetta_relax":     bool(st.session_state.s_rosetta_relax),
+                "checkpoint_path":   st.session_state.s_checkpoint_path,
+                "autoencoder_path":  st.session_state.s_autoencoder_path,
+                "folding_model":     st.session_state.s_folding_model,
+                "protenix_model":    st.session_state.s_protenix_model,
+                "target_msa":        st.session_state.s_target_msa,
+                "hotspot_str":       hotspot_str.strip(),
+                "target_length":     st.session_state.target_length,
+            },
+        })
+        _added += 1
+    st.success(f"Added {_added} placement(s). Queue total: {len(st.session_state.batch_queue)}")
+
+# Queue display
+if st.session_state.batch_queue:
+    st.markdown(f"**{len(st.session_state.batch_queue)} item(s) in queue:**")
+    _to_remove = None
+    for _qi, _qitem in enumerate(st.session_state.batch_queue):
+        _c1, _c2 = st.columns([7, 1])
+        with _c1:
+            st.markdown(
+                f"`{_qi + 1}.` **{_qitem['label']}** — "
+                f"seed_len={_qitem['n_seed']}, "
+                f"spin={_qitem['rotation']:.0f}°, tilt={_qitem.get('tilt', 0):.0f}°"
+            )
+        with _c2:
+            if st.button("✕", key=f"rm_batch_{_qi}", help="Remove from queue"):
+                _to_remove = _qi
+    if _to_remove is not None:
+        st.session_state.batch_queue.pop(_to_remove)
+        st.rerun()
+
+    col_clr, _ = st.columns([2, 5])
+    with col_clr:
+        if st.button("🗑 Clear queue"):
+            st.session_state.batch_queue = []
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("Generate batch array job")
+
+    # Auto-populate save dir from first queue item the first time
+    if not st.session_state.s_batch_save_dir and st.session_state.batch_queue:
+        st.session_state.s_batch_save_dir = tr.to_local(
+            st.session_state.batch_queue[0]["base_output_dir"]
+        ).rstrip("/")
+
+    _batch_save_dir = st.text_input(
+        "Save directory (local NFS path — all batch PDBs, JSONs, and manifest go here)",
+        key="s_batch_save_dir",
+    )
+    _max_concurrent = st.number_input(
+        "Max concurrent SLURM array tasks",
+        min_value=1, max_value=50, step=1,
+        key="s_batch_max_concurrent",
+    )
+
+    if st.button("🚀 Save all + generate batch job", use_container_width=True):
+        if not _batch_save_dir.strip():
+            st.error("Enter a save directory.")
+            st.stop()
+        _bsave = Path(_batch_save_dir.strip())
+        try:
+            _bsave.mkdir(parents=True, exist_ok=True)
+        except Exception as _e:
+            st.error(f"Cannot create directory {_bsave}: {_e}")
+            st.stop()
+
+        _cluster_json_paths = []
+        for _item in st.session_state.batch_queue:
+            _bn = _item["label"]
+            _pdb_file  = str(_bsave / f"{_bn}_linked.pdb")
+            _json_file = str(_bsave / f"{_bn}_settings.json")
+
+            with open(_pdb_file, "w") as _f:
+                _f.write(_item["pdb_string"])
+
+            _ss = _item["settings_snapshot"]
+            _settings = build_settings(
+                binder_name=_bn,
+                starting_pdb_local=_pdb_file,
+                output_dir_cluster=_item["base_output_dir"] + _item["suffix"],
+                target_length=_ss["target_length"],
+                hotspot_residues_str=_ss["hotspot_str"],
+                linker_length=_item["n_seed"],
+                keep_linker_end_n=_ss["keep_linker_end_n"],
+                n_samples=_ss["n_samples"],
+                batch_size=_ss["batch_size"],
+                binder_length_min=_ss["binder_length_min"],
+                binder_length_max=_ss["binder_length_max"],
+                laproteina_mode=_ss["laproteina_mode"],
+                checkpoint_path=_ss["checkpoint_path"],
+                autoencoder_path=_ss["autoencoder_path"],
+                folding_model=_ss["folding_model"],
+                protenix_model=_ss["protenix_model"] if _ss["folding_model"] == "protenix" else None,
+                target_msa=_ss["target_msa"] if _ss["folding_model"] == "protenix" else None,
+                rosetta_relax=_ss["rosetta_relax"],
+            )
+            save_settings(_settings, _json_file)
+            _cluster_json_paths.append(tr.to_cluster(_json_file))
+
+        _manifest_local = str(_bsave / f"batch_manifest_{_ts()}.txt")
+        save_batch_manifest(_cluster_json_paths, _manifest_local)
+        _manifest_cluster = tr.to_cluster(_manifest_local)
+
+        st.success(
+            f"Saved {len(_cluster_json_paths)} configuration(s) + manifest to `{_bsave}`"
+        )
+        st.subheader("SLURM batch command")
+        st.caption("Copy this to your cluster terminal:")
+        st.code(
+            batch_slurm_command(_manifest_cluster, len(_cluster_json_paths), int(_max_concurrent)),
+            language="bash",
+        )
+        with st.expander("Manifest contents"):
+            st.code("\n".join(_cluster_json_paths), language="text")
+
+# ---------------------------------------------------------------------------
+# ── Section 6: Output ──
+# ---------------------------------------------------------------------------
+
+st.header("6 · Output")
 
 _local_default = tr.to_local(output_dir_cluster)
 if not st.session_state.s_save_dir_local:
@@ -481,8 +654,10 @@ if st.button("💾 Save files + show SLURM commands", use_container_width=True):
         st.stop()
 
     saved_pairs = []
-    for i, (linked, n_seed_i, rot) in enumerate(st.session_state.linked_structures):
-        suffix = f"_rot{rot:.0f}" if len(st.session_state.linked_structures) > 1 else ""
+    for i, (linked, n_seed_i, rot, tilt_i) in enumerate(st.session_state.linked_structures):
+        _spin_str = f"_rot{rot:.0f}" if len(st.session_state.linked_structures) > 1 else ""
+        _tilt_str = f"_tilt{tilt_i:.0f}" if abs(tilt_i) > 0.5 else ""
+        suffix = _spin_str + _tilt_str
         pdb_filename  = f"{binder_name}{suffix}_linked.pdb"
         json_filename = f"{binder_name}{suffix}_settings.json"
 

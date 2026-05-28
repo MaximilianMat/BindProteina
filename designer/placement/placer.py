@@ -28,6 +28,7 @@ def place_seed(
     distance: float,
     seed_type: str,
     rotation_deg: float = 0.0,
+    tilt_deg: float = 0.0,
     custom_pdb: Optional[str] = None,
 ) -> Tuple[struc.AtomArray, int]:
     """
@@ -39,13 +40,13 @@ def place_seed(
         direction:    Unit vector indicating placement direction.
         distance:     How far from anchor_pos to place the seed's first CA (Å).
         seed_type:    Key into the seed library.
-        rotation_deg: Rotation around the anchor→placement axis (only matters for
-                      multi-residue seeds, changes orientation of the helix/strand).
+        rotation_deg: Spin around the anchor→placement axis (°).
+        tilt_deg:     Tilt around an axis perpendicular to the placement direction (°).
+                      0° = seed extends along direction; 90° = seed lies tangent to surface.
         custom_pdb:   PDB string for 'custom' seed type.
 
     Returns:
-        (linked_structure, seed_n_residues): linked AtomArray (target + seed, all chain A)
-        and the number of seed residues.
+        (linked_structure, seed_n_residues)
     """
     direction = _normalize(direction)
     placement_point = anchor_pos + distance * direction
@@ -60,11 +61,18 @@ def place_seed(
     seed_struct = seed_struct.copy()
     seed_struct.coord += (placement_point - first_ca)
 
-    # Rotate around the anchor→placement axis if requested
-    if abs(rotation_deg) > 1e-3:
-        axis = direction  # the direction from anchor to placement IS the rotation axis
+    # Tilt: rotate around a consistent perpendicular axis through placement_point.
+    # This tips the seed from pointing along `direction` toward lying tangent.
+    if abs(tilt_deg) > 1e-3:
+        tilt_axis = _perpendicular_to(direction)
         seed_struct.coord = _rotate_points(
-            seed_struct.coord, axis, np.radians(rotation_deg), pivot=placement_point
+            seed_struct.coord, tilt_axis, np.radians(tilt_deg), pivot=placement_point
+        )
+
+    # Spin: rotate around the anchor→placement axis (applied after tilt)
+    if abs(rotation_deg) > 1e-3:
+        seed_struct.coord = _rotate_points(
+            seed_struct.coord, direction, np.radians(rotation_deg), pivot=placement_point
         )
 
     # Renumber seed: target occupies 1..target_length, seed follows
@@ -102,21 +110,24 @@ def generate_candidates(
     distance: float,
     seed_type: str,
     n_candidates: int,
+    tilt_deg: float = 0.0,
     custom_pdb: Optional[str] = None,
-) -> List[Tuple[struc.AtomArray, int, float]]:
+) -> List[Tuple[struc.AtomArray, int, float, float]]:
     """
-    Generate N linked structures, each rotated evenly around the direction axis.
+    Generate N linked structures, each spin-rotated evenly around the direction axis
+    at a fixed tilt angle.
 
-    Returns list of (linked_structure, n_seed_residues, rotation_deg_used).
+    Returns list of (linked_structure, n_seed_residues, spin_deg, tilt_deg).
     """
     angles = np.linspace(0, 360, n_candidates, endpoint=False)
     results = []
     for angle in angles:
         linked, n_seed = place_seed(
             target, anchor_pos, direction, distance,
-            seed_type, rotation_deg=angle, custom_pdb=custom_pdb,
+            seed_type, rotation_deg=angle, tilt_deg=tilt_deg,
+            custom_pdb=custom_pdb,
         )
-        results.append((linked, n_seed, float(angle)))
+        results.append((linked, n_seed, float(angle), tilt_deg))
     return results
 
 
@@ -151,6 +162,14 @@ def _normalize(v: np.ndarray) -> np.ndarray:
     if n < 1e-9:
         raise ValueError("Cannot normalise a zero vector")
     return v / n
+
+
+def _perpendicular_to(v: np.ndarray) -> np.ndarray:
+    """Return a consistent unit vector perpendicular to v."""
+    ref = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(v, ref)) > 0.9:
+        ref = np.array([1.0, 0.0, 0.0])
+    return _normalize(np.cross(v, ref))
 
 
 def _rotate_points(

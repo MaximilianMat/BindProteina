@@ -122,3 +122,21 @@ def save_settings(settings: Dict[str, Any], output_path: str) -> str:
 
 def slurm_command(settings_cluster_path: str, slurm_script: str = "laproteina_generate.slurm") -> str:
     return f"sbatch {slurm_script} --settings {settings_cluster_path}"
+
+
+def save_batch_manifest(settings_cluster_paths: List[str], output_path: str) -> str:
+    """Write a newline-delimited manifest file (one cluster JSON path per line)."""
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write("\n".join(settings_cluster_paths) + "\n")
+    return output_path
+
+
+def batch_slurm_command(
+    manifest_cluster_path: str, n_jobs: int, max_concurrent: int = 6
+) -> str:
+    """Return the sbatch command for a SLURM array job over the given manifest."""
+    return (
+        f"sbatch --array=0-{n_jobs - 1}%{max_concurrent} "
+        f"laproteina_generate_batch.slurm --batch {manifest_cluster_path}"
+    )
