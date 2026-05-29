@@ -18,12 +18,14 @@ def find_pdb_files(root_dir):
     return pdb_files
 
 
-def analyze_secondary_structure(input_dir, chain_id="B"):
+def analyze_secondary_structure(input_dir, chain_id="B", residue_filter=None):
 
     global_counts = Counter()
     protein_stats = []
 
     pdb_files = find_pdb_files(input_dir)
+    if residue_filter:
+        pdb_files = [p for p in pdb_files if residue_filter in p]
 
     if len(pdb_files) == 0:
         print(f"No PDB files found in: {input_dir}")
@@ -129,6 +131,10 @@ def main():
         default="B",
         help="Chain ID to analyze (default: B)"
     )
+    parser.add_argument(
+        "--residue",
+        help="Optional hotspot residue substring filter (e.g., 'hs60')"
+    )
 
     args = parser.parse_args()
 
@@ -136,7 +142,7 @@ def main():
         print(f"Directory not found: {args.pdb_dir}")
         return
 
-    analyze_secondary_structure(args.pdb_dir, args.chain)
+    analyze_secondary_structure(args.pdb_dir, args.chain, args.residue)
 
 
 if __name__ == "__main__":
