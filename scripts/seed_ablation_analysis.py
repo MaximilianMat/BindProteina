@@ -89,7 +89,10 @@ def plot_heatmaps(df: pd.DataFrame, dims: list[str], output_dir: Path):
 
     if facet_dims:
         # Build facet groups from the Cartesian product of remaining dims
-        facet_groups = df.groupby(facet_dims, dropna=False)
+        df_faceted = df.copy()
+        for d in facet_dims:
+            df_faceted[d] = df_faceted[d].fillna("N/A")
+        facet_groups = df_faceted.groupby(facet_dims)
     else:
         facet_groups = [(None, df)]
 

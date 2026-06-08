@@ -3,6 +3,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -16,7 +17,8 @@ parser = argparse.ArgumentParser(description="Cluster generated binders with Fol
 parser.add_argument(
     "--input",
     required=True,
-    help="Folder containing experimental runs"
+    nargs='+',
+    help="One or more input folders to compare (source label = folder basename)"
 )
 
 parser.add_argument(
@@ -56,7 +58,7 @@ args = parser.parse_args()
 # PATHS
 # ============================================================
 
-INPUT_DIR = Path(args.input)
+INPUT_DIRS = [Path(p) for p in args.input]
 OUTPUT_DIR = Path(args.output)
 TMP_DIR = Path(args.tmp)
 
@@ -70,9 +72,15 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 print(f"Discovering PDB files (STRICT '{args.pdb_dir}' leaf-level only)...")
 
+# Collect (pdb_file, source_label, source_dir) from all input dirs
+all_pdb_files = []
+for input_dir in INPUT_DIRS:
+    for pdb_file in sorted(input_dir.rglob(f"{args.pdb_dir}/*.pdb")):
+        all_pdb_files.append((pdb_file, input_dir.name, input_dir))
+all_pdb_files.sort(key=lambda x: (x[1], str(x[0])))
+
 samples = []
-# Ensure stable sorting for reproducibility
-for i, pdb_file in enumerate(sorted(INPUT_DIR.rglob(f"{args.pdb_dir}/*.pdb"))):
+for i, (pdb_file, source, source_dir) in enumerate(all_pdb_files):
 
     if not pdb_file.is_file():
         continue
@@ -80,35 +88,22 @@ for i, pdb_file in enumerate(sorted(INPUT_DIR.rglob(f"{args.pdb_dir}/*.pdb"))):
     if pdb_file.parent.name != args.pdb_dir:
         continue
 
-    parts = pdb_file.parts
+    rel_parts = pdb_file.relative_to(source_dir).parts
+    seed = next((p for p in rel_parts if p.startswith("initial_")), "unknown_seed")
+    seed_idx = list(rel_parts).index(seed) if seed != "unknown_seed" else len(rel_parts) - 2
+    # experiment = path between source root and initial_* dir; works for any sub-folder depth
+    experiment = "/".join(rel_parts[:seed_idx]) if seed_idx > 0 else "default"
 
-    # Parse metadata from path
-    seed = next((p for p in reversed(parts) if p.startswith("initial_")), "unknown_seed")
-    rotation = next((p for p in reversed(parts) if p.startswith("_rot")), "unknown_rot")
-    
-    base_run = "unknown_base"
-    if rotation != "unknown_rot":
-        try:
-            rot_idx = parts.index(rotation)
-            if rot_idx > 0:
-                base_run = parts[rot_idx - 1]
-        except ValueError:
-            pass
-
-    sample_name = pdb_file.stem
-    
-    # We assign a unique ID to each file to prevent any name collision or parsing issues later
     extracted_filename = f"struct_{i:06d}.pdb"
-    
+
     samples.append({
         "extracted_filename": extracted_filename,
         "original_path": str(pdb_file.resolve()),
-        "base_run": base_run,
-        "rotation": rotation,
+        "source": source,
+        "experiment": experiment,
         "seed": seed,
-        "sample": sample_name,
-        "experiment": f"{base_run}__{rotation}",
-        "group_id": f"{base_run}__{rotation}__{seed}" # unique identifier for the input seed
+        "sample": pdb_file.stem,
+        "group_id": f"{source}/{experiment}/{seed}",
     })
 
 samples_df = pd.DataFrame(samples)
@@ -272,56 +267,50 @@ final_df.to_csv(OUTPUT_DIR / "cluster_assignments_with_metadata.csv", index=Fals
 
 
 # ============================================================
-# COMPUTE DIVERSITY PER INPUT SEED
+# COMPUTE DIVERSITY STATISTICS
 # ============================================================
 
-print("Computing statistics per input seed...")
+print("Computing diversity statistics...")
 
-# We want to see how diverse the 100 samples were *for each input seed*
-seed_stats = final_df.groupby("group_id").agg(
-    experiment=("experiment", "first"),
-    base_run=("base_run", "first"),
-    rotation=("rotation", "first"),
-    seed=("seed", "first"),
-    num_samples=("member", "count"),
-    num_clusters=("cluster_id", "nunique")
-).reset_index()
-
-# Fraction of clusters hit by the samples of this seed
-seed_stats["cluster_hit_fraction"] = seed_stats["num_clusters"] / seed_stats["num_samples"]
-
-# Compute global cluster sizes
+# Compute global cluster sizes and tag singletons
 cluster_sizes = final_df["cluster_id"].value_counts().reset_index()
 cluster_sizes.columns = ["cluster_id", "cluster_size"]
-
 final_df = final_df.merge(cluster_sizes, on="cluster_id", how="left")
 final_df["is_singleton"] = final_df["cluster_size"] == 1
 
-# Calculate proportion of samples per seed that ended up as singletons globally
-seed_singletons = final_df.groupby("group_id")["is_singleton"].mean().reset_index(name="singleton_fraction")
-seed_stats = seed_stats.merge(seed_singletons, on="group_id")
-
+# Seed-level stats (one row per initial_* dir per source)
+seed_stats = final_df.groupby("group_id").agg(
+    source=("source", "first"),
+    experiment=("experiment", "first"),
+    seed=("seed", "first"),
+    num_samples=("member", "count"),
+    num_clusters=("cluster_id", "nunique"),
+    num_singletons=("is_singleton", "sum"),
+).reset_index()
+seed_stats["cluster_hit_fraction"] = seed_stats["num_clusters"] / seed_stats["num_samples"]
+seed_stats["singleton_fraction"]   = seed_stats["num_singletons"] / seed_stats["num_samples"]
 seed_stats.to_csv(OUTPUT_DIR / "seed_diversity_statistics.csv", index=False)
 
-
-# ============================================================
-# COMPUTE EXPERIMENT LEVEL STATS
-# ============================================================
-
-print("Computing statistics per experiment (base_run + rotation)...")
-
-exp_stats = final_df.groupby("experiment").agg(
-    base_run=("base_run", "first"),
-    rotation=("rotation", "first"),
+# Experiment-level stats (aggregated across seeds)
+exp_stats = final_df.groupby(["source", "experiment"]).agg(
     num_seeds=("seed", "nunique"),
     num_samples=("member", "count"),
-    num_clusters=("cluster_id", "nunique")
+    num_clusters=("cluster_id", "nunique"),
+    num_singletons=("is_singleton", "sum"),
 ).reset_index()
-
-exp_singletons = final_df.groupby("experiment")["is_singleton"].mean().reset_index(name="singleton_fraction")
-exp_stats = exp_stats.merge(exp_singletons, on="experiment")
-
+exp_stats["cluster_hit_fraction"] = exp_stats["num_clusters"] / exp_stats["num_samples"]
+exp_stats["singleton_fraction"]   = exp_stats["num_singletons"] / exp_stats["num_samples"]
 exp_stats.to_csv(OUTPUT_DIR / "experiment_statistics.csv", index=False)
+
+# Source-level stats (aggregated across all experiments and seeds)
+source_stats = final_df.groupby("source").agg(
+    num_samples=("member", "count"),
+    num_clusters=("cluster_id", "nunique"),
+    num_singletons=("is_singleton", "sum"),
+).reset_index()
+source_stats["cluster_hit_fraction"] = source_stats["num_clusters"] / source_stats["num_samples"]
+source_stats["singleton_fraction"]   = source_stats["num_singletons"] / source_stats["num_samples"]
+source_stats.to_csv(OUTPUT_DIR / "source_statistics.csv", index=False)
 
 
 # ============================================================
@@ -330,67 +319,147 @@ exp_stats.to_csv(OUTPUT_DIR / "experiment_statistics.csv", index=False)
 
 sns.set_style("whitegrid")
 
-# 1. Diversity (Clusters Hit) per Seed
-plt.figure(figsize=(12, 6))
-sns.boxplot(
-    data=seed_stats,
-    x="experiment",
-    y="cluster_hit_fraction",
-    color="lightgray",
-    showfliers=False
+# ── Plot 1: Absolute counts per source ───────────────────────
+# Raw numbers: how many samples, unique clusters, and singletons each source produced.
+abs_melted = source_stats.melt(
+    id_vars="source",
+    value_vars=["num_samples", "num_clusters", "num_singletons"],
+    var_name="metric", value_name="count"
 )
-sns.stripplot(
-    data=seed_stats,
-    x="experiment",
-    y="cluster_hit_fraction",
-    hue="num_samples",
-    palette="viridis",
-    alpha=0.8,
-    jitter=True
-)
-plt.xticks(rotation=45, ha='right')
-plt.ylabel("Diversity Fraction\n(Unique Clusters / Successful Samples)")
-plt.title("Normalized Structural Diversity Per Input Seed\n(Dots colored by number of successful samples)")
-
-# Fix legend for continuous hue if needed
-plt.legend(title="Successes\n(Num Samples)", bbox_to_anchor=(1.05, 1), loc='upper left')
-
+abs_melted["metric"] = abs_melted["metric"].map({
+    "num_samples":    "Samples",
+    "num_clusters":   "Clusters Hit",
+    "num_singletons": "Singletons",
+})
+fig, ax = plt.subplots(figsize=(8, 5))
+sns.barplot(data=abs_melted, x="metric", y="count", hue="source", ax=ax)
+for container in ax.containers:
+    ax.bar_label(container, fmt="%d", padding=3)
+ax.set_title("Absolute Counts per Source")
+ax.set_xlabel("")
+ax.set_ylabel("Count")
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "diversity_fraction_per_seed.png", dpi=300)
+plt.savefig(OUTPUT_DIR / "plot1_absolute_counts.png", dpi=300)
 plt.close()
 
-# 2. Singleton Fraction per Experiment
-plt.figure(figsize=(10, 6))
-sns.barplot(
-    data=exp_stats,
-    x="experiment",
-    y="singleton_fraction"
+# ── Plot 2: Diversity fractions per source ────────────────────
+# Normalised fractions make sources comparable regardless of sample count.
+frac_melted = source_stats.melt(
+    id_vars="source",
+    value_vars=["cluster_hit_fraction", "singleton_fraction"],
+    var_name="metric", value_name="fraction"
 )
-plt.xticks(rotation=45, ha='right')
-plt.ylabel("Singleton Fraction")
-plt.title("Novelty / Uniqueness Per Experiment")
+frac_melted["metric"] = frac_melted["metric"].map({
+    "cluster_hit_fraction": "Cluster Hit Fraction\n(diversity)",
+    "singleton_fraction":   "Singleton Fraction\n(novelty)",
+})
+fig, ax = plt.subplots(figsize=(7, 5))
+sns.barplot(data=frac_melted, x="metric", y="fraction", hue="source", ax=ax)
+for container in ax.containers:
+    ax.bar_label(container, fmt="%.2f", padding=3)
+ax.set_title("Diversity Fractions per Source")
+ax.set_ylabel("Fraction")
+ax.set_xlabel("")
+ax.set_ylim(0, 1.1)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "singleton_fraction_per_experiment.png", dpi=300)
+plt.savefig(OUTPUT_DIR / "plot2_diversity_fractions.png", dpi=300)
 plt.close()
 
-# 3. Global Cluster Size Distribution
-plt.figure(figsize=(8, 6))
-plt.hist(
-    cluster_sizes["cluster_size"],
-    bins=30,
-    edgecolor="black"
-)
-plt.xlabel("Cluster Size")
-plt.ylabel("Count")
-plt.title("Global Cluster Size Distribution")
+# ── Plot 3: Seed-level diversity distribution (violin) ────────
+# Shows consistency: is every seed diverse, or only some?
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, metric, label in zip(
+    axes,
+    ["cluster_hit_fraction", "singleton_fraction"],
+    ["Cluster Hit Fraction", "Singleton Fraction"],
+):
+    sns.violinplot(data=seed_stats, x="source", y=metric, ax=ax, inner="box", cut=0)
+    ax.set_title(f"{label}")
+    ax.set_ylabel(label)
+    ax.set_xlabel("")
+    ax.set_ylim(0, 1)
+plt.suptitle("Seed-Level Diversity Distribution (per source)", fontsize=14)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "cluster_size_distribution.png", dpi=300)
+plt.savefig(OUTPUT_DIR / "plot3_seed_diversity_distribution.png", dpi=300)
+plt.close()
+
+# ── Plot 4: Cluster size CDF per source ───────────────────────
+# Left-shifted CDF = more unique structures (smaller clusters on average).
+fig, ax = plt.subplots(figsize=(8, 5))
+for src in sorted(final_df["source"].unique()):
+    sizes = final_df[final_df["source"] == src]["cluster_size"].sort_values()
+    cdf = np.arange(1, len(sizes) + 1) / len(sizes)
+    ax.plot(sizes.values, cdf, label=src)
+ax.set_xlabel("Cluster Size")
+ax.set_ylabel("CDF (fraction of structures)")
+ax.set_title("Cluster Size CDF by Source\n(steeper rise left = more unique structures)")
+ax.legend()
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "plot4_cluster_size_cdf.png", dpi=300)
+plt.close()
+
+# ── Plot 5: Cross-source cluster overlap ─────────────────────
+# How much structural space do the two generators share vs explore exclusively?
+sources = sorted(final_df["source"].unique())
+if len(sources) == 2:
+    s1, s2 = sources
+    cluster_src_sets = final_df.groupby("cluster_id")["source"].apply(lambda x: frozenset(x.unique()))
+    only_s1 = (cluster_src_sets == frozenset([s1])).sum()
+    only_s2 = (cluster_src_sets == frozenset([s2])).sum()
+    shared   = (cluster_src_sets == frozenset([s1, s2])).sum()
+    labels = [f"Only\n{s1}", "Shared", f"Only\n{s2}"]
+    values = [int(only_s1), int(shared), int(only_s2)]
+    colors = ["#4e79a7", "#76b7b2", "#f28e2b"]
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bars = ax.bar(labels, values, color=colors)
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3, str(val), ha='center', va='bottom')
+    ax.set_ylabel("Number of Clusters")
+    ax.set_title("Cross-Source Cluster Overlap\n(shared = structural motif found by both generators)")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "plot5_cross_source_overlap.png", dpi=300)
+    plt.close()
+
+# ── Plot 6: Per-experiment comparison (if multiple experiments) ─
+# Direct head-to-head for each experimental condition.
+if exp_stats["experiment"].nunique() > 1:
+    n_exp = len(exp_stats)
+    fig, axes = plt.subplots(1, 2, figsize=(max(10, n_exp * 1.2), 5))
+    for ax, metric, label in zip(
+        axes,
+        ["cluster_hit_fraction", "singleton_fraction"],
+        ["Cluster Hit Fraction", "Singleton Fraction"],
+    ):
+        sns.barplot(data=exp_stats, x="experiment", y=metric, hue="source", ax=ax)
+        for container in ax.containers:
+            ax.bar_label(container, fmt="%.2f", padding=3)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha='right')
+        ax.set_title(f"{label} per Experiment")
+        ax.set_ylabel(label)
+        ax.set_xlabel("")
+        ax.set_ylim(0, 1.1)
+    plt.suptitle("Per-Experiment Diversity Comparison", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "plot6_per_experiment_comparison.png", dpi=300)
+    plt.close()
+
+# ── Plot 7: Global cluster size distribution ──────────────────
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.hist(cluster_sizes["cluster_size"], bins=30, edgecolor="black")
+ax.set_xlabel("Cluster Size")
+ax.set_ylabel("Count")
+ax.set_title("Global Cluster Size Distribution (all sources combined)")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "plot7_cluster_size_distribution.png", dpi=300)
 plt.close()
 
 
 # ============================================================
 # SUMMARY
 # ============================================================
+
+print("\n=== SUMMARY (Per Source) ===")
+print(source_stats.to_string())
 
 print("\n=== SUMMARY (Per Experiment) ===")
 print(exp_stats.to_string())

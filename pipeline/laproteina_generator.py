@@ -65,6 +65,9 @@ class MotifConfig:
     direct_binder_mode: bool = False
     binder_chain_gap: int = 200
     binder_target_nres: Optional[int] = None
+    cath_codes: Optional[List[str]] = None
+    len_cath_code_path: Optional[str] = None
+    cath_code_level: Optional[str] = None
 
 
 @dataclass
@@ -252,6 +255,17 @@ class LaProteinaGenerator:
                     motif_config.binder_chain_gap
                 )
                 cfg.generation.dataset.binder_target_nres = motif_config.binder_target_nres
+                cfg.generation.dataset.cath_codes = motif_config.cath_codes
+                
+                # Enable fold conditioning if CATH codes or empirical distribution is used
+                if motif_config.cath_codes is not None or motif_config.len_cath_code_path is not None:
+                    cfg.generation.args.fold_cond = True
+                
+                if motif_config.len_cath_code_path is not None:
+                    if "empirical_distribution_cfg" not in cfg.generation.dataset or cfg.generation.dataset.empirical_distribution_cfg is None:
+                        cfg.generation.dataset.empirical_distribution_cfg = {}
+                    cfg.generation.dataset.empirical_distribution_cfg.len_cath_code_path = motif_config.len_cath_code_path
+                    cfg.generation.dataset.empirical_distribution_cfg.cath_code_level = motif_config.cath_code_level
                 
                 # Set up our custom motif task
                 cfg.generation.dataset.motif_task_name = "BINDER_GENERATION"
@@ -308,7 +322,7 @@ class LaProteinaGenerator:
                     "motif_cond": True,
                     "nsteps": gen_config.n_steps,
                     "self_cond": True,
-                    "fold_cond": False,
+                    "fold_cond": True if (motif_config.cath_codes is not None or motif_config.len_cath_code_path is not None) else False,
                     "guidance_w": 1.0,
                     "ag_ratio": 0.0,
                     "ag_ckpt_path": None,
@@ -381,10 +395,10 @@ class LaProteinaGenerator:
                         "max_len": None,
                         "step_len": None,
                     },
-                    "cath_codes": None,
+                    "cath_codes": motif_config.cath_codes,
                     "empirical_distribution_cfg": {
-                        "len_cath_code_path": None,
-                        "cath_code_level": None,
+                        "len_cath_code_path": motif_config.len_cath_code_path,
+                        "cath_code_level": motif_config.cath_code_level,
                         "bucket_min_len": 50,
                         "bucket_max_len": 274,
                         "bucket_step_size": 25,
@@ -423,6 +437,9 @@ class LaProteinaGenerator:
         direct_binder_mode: bool = False,
         binder_chain_gap: int = 200,
         binder_target_nres: Optional[int] = None,
+        cath_codes: Optional[List[str]] = None,
+        len_cath_code_path: Optional[str] = None,
+        cath_code_level: Optional[str] = None,
     ) -> List[str]:
         """
         Generate binder candidates for a target protein.
@@ -500,6 +517,9 @@ class LaProteinaGenerator:
                 if binder_target_nres is not None
                 else int(target_residue_range[1])
             ),
+            cath_codes=cath_codes,
+            len_cath_code_path=len_cath_code_path,
+            cath_code_level=cath_code_level,
         )
         
         gen_cfg = GenerationConfig(

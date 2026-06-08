@@ -39,7 +39,9 @@ def build_settings(
     # --- folding model ---
     folding_model: Optional[str] = None,     # "af2" or "protenix"
     protenix_model: Optional[str] = None,    # only used when folding_model="protenix"
+    protenix_n_diffusion_samples: Optional[int] = None,  # diffusion samples per design (default 5; 3 ≈ 40% faster)
     target_msa: Optional[str] = None,        # optional cluster path to .a3m MSA file
+    target_template: Optional[str] = None,   # optional cluster path to target PDB for Protenix templating
     # --- misc ---
     rosetta_relax: Optional[bool] = None,
 ) -> Dict[str, Any]:
@@ -97,8 +99,12 @@ def build_settings(
     # Protenix-specific fields — only added when protenix is selected
     if folding_model == "protenix":
         settings["protenix_model"] = protenix_model
+        if protenix_n_diffusion_samples is not None:
+            settings["protenix_n_diffusion_samples"] = protenix_n_diffusion_samples
         if target_msa and target_msa.strip():
             settings["target_msa"] = target_msa.strip()
+        if target_template and target_template.strip():
+            settings["target_template"] = target_template.strip()
 
     # Optional fields
     if target_length is not None:

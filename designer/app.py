@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime
@@ -94,6 +95,39 @@ def _ts() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+_AA3TO1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
+
+
+def _pdb_sequence(pdb_path: str, chain_id: str) -> str:
+    """Extract 1-letter sequence for one chain from a PDB file.
+
+    PDB column layout (0-indexed): atom_name=12:16, res_name=17:20,
+    chain_id=21, res_seq+icode=22:27.
+    """
+    seen: set = set()
+    residues: list = []
+    with open(pdb_path) as _f:
+        for _line in _f:
+            if len(_line) < 27:
+                continue
+            if not _line.startswith("ATOM"):
+                continue
+            if _line[12:16].strip() != "CA":
+                continue
+            if _line[21] != chain_id:
+                continue
+            _key = _line[22:27]  # residue seq number (4) + insertion code (1)
+            if _key not in seen:
+                seen.add(_key)
+                residues.append(_AA3TO1.get(_line[17:20].strip(), "X"))
+    return "".join(residues)
+
+
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
@@ -120,8 +154,10 @@ _STATE_DEFAULTS: dict = {
     "s_checkpoint_path":   _d["checkpoint_path"],
     "s_autoencoder_path":  _d["autoencoder_path"],
     "s_folding_model":     _d.get("folding_model", "af2"),
-    "s_protenix_model":    _d.get("protenix_model", "protenix-v2"),
-    "s_target_msa":        "",
+    "s_protenix_model":         _d.get("protenix_model", "protenix-v2"),
+    "s_target_msa":             "",
+    "s_protenix_use_template":  False,
+    "s_original_pdb_local":     "",
     "s_output_dir":           _d["default_output_dir"],
     "s_save_dir_local":       "",
     # batch queue
@@ -164,6 +200,7 @@ if pdb_source == "File path (NFS mount)":
                 st.session_state.target_pdb_str = f.read()
             ids = residue_ids_in_chain(st.session_state.target_structure, chain_id)
             st.session_state.target_length = len(ids)
+            st.session_state.s_original_pdb_local = pdb_path_input
             st.success(f"Loaded  {st.session_state.target_length} residues (chain {chain_id})")
         except Exception as e:
             st.error(f"Failed to load PDB: {e}")
@@ -433,6 +470,8 @@ with col_b:
     checkpoint_path  = st.text_input("checkpoint_path",  key="s_checkpoint_path")
     autoencoder_path = st.text_input("autoencoder_path", key="s_autoencoder_path")
 
+tr = get_path_translator()
+
 st.subheader("Folding model")
 _folding_col, _protenix_col = st.columns(2)
 
@@ -461,12 +500,29 @@ with _protenix_col:
             key="s_target_msa",
             help="Pre-computed MSA for the target. Leave blank to skip.",
         )
+        use_template = st.checkbox(
+            "Use target PDB as Protenix template",
+            key="s_protenix_use_template",
+            help="Passes the original target PDB as a structural template to Protenix "
+                 "(templatesPath). Helps preserve the target conformation and typically "
+                 "improves sc_RMSD.",
+        )
+        if use_template:
+            _orig = st.session_state.s_original_pdb_local
+            _tpl_default = tr.to_cluster(_orig) if _orig else ""
+            target_template = st.text_input(
+                "Template PDB path (cluster path)",
+                value=_tpl_default,
+                help="Auto-filled from the target PDB loaded in Section 1. Edit if needed.",
+            )
+        else:
+            target_template = ""
     else:
         protenix_model = _d["protenix_model"]
         target_msa = ""
+        target_template = ""
         st.caption("Protenix options only shown when protenix is selected.")
 
-tr = get_path_translator()
 # Auto-suggest output dir when binder name changes; user can override freely
 _output_dir_default = f"{_d['default_output_dir']}/{binder_name}"
 if st.session_state.s_output_dir == _d["default_output_dir"] or not st.session_state.s_output_dir:
@@ -512,10 +568,12 @@ if st.button("➕ Add current placements to batch queue", use_container_width=Tr
                 "rosetta_relax":     bool(st.session_state.s_rosetta_relax),
                 "checkpoint_path":   st.session_state.s_checkpoint_path,
                 "autoencoder_path":  st.session_state.s_autoencoder_path,
-                "folding_model":     st.session_state.s_folding_model,
-                "protenix_model":    st.session_state.s_protenix_model,
-                "target_msa":        st.session_state.s_target_msa,
-                "hotspot_str":       hotspot_str.strip(),
+                "folding_model":          st.session_state.s_folding_model,
+                "protenix_model":         st.session_state.s_protenix_model,
+                "target_msa":             st.session_state.s_target_msa,
+                "protenix_use_template":  st.session_state.s_protenix_use_template,
+                "original_pdb_local":     st.session_state.s_original_pdb_local,
+                "hotspot_str":            hotspot_str.strip(),
                 "target_length":     st.session_state.target_length,
             },
         })
@@ -577,6 +635,26 @@ if st.session_state.batch_queue:
             st.error(f"Cannot create directory {_bsave}: {_e}")
             st.stop()
 
+        _batch_tpl_cluster = None
+        _batch_protenix_mt_cmd = None
+        for _item in st.session_state.batch_queue:
+            _ss0 = _item["settings_snapshot"]
+            if _ss0.get("protenix_use_template") and _ss0.get("folding_model") == "protenix" and _ss0.get("original_pdb_local"):
+                _orig = Path(_ss0["original_pdb_local"])
+                if _orig.exists():
+                    _tpl_copy = _bsave / _orig.name
+                    if not _tpl_copy.exists():
+                        shutil.copy2(_orig, _tpl_copy)
+                    _target_seq = _pdb_sequence(str(_tpl_copy), chain_id)
+                    _tpl_input_local = _bsave / "template_input.json"
+                    with open(_tpl_input_local, "w") as _fj:
+                        json.dump([{"name": "target", "sequences": [{"proteinChain": {"count": 1, "sequence": _target_seq, "modifications": []}}]}], _fj, indent=2)
+                    _tpl_input_cluster = tr.to_cluster(str(_tpl_input_local))
+                    _tpl_search_dir_cluster = tr.to_cluster(str(_bsave / "template_search"))
+                    _batch_tpl_cluster = f"{_tpl_search_dir_cluster}/target/msa/0/hmmsearch.a3m"
+                    _batch_protenix_mt_cmd = f"python scripts/prepare_template.py -i {_tpl_input_cluster} -o {_tpl_search_dir_cluster}"
+                break
+
         _cluster_json_paths = []
         for _item in st.session_state.batch_queue:
             _bn = _item["label"]
@@ -605,6 +683,11 @@ if st.session_state.batch_queue:
                 folding_model=_ss["folding_model"],
                 protenix_model=_ss["protenix_model"] if _ss["folding_model"] == "protenix" else None,
                 target_msa=_ss["target_msa"] if _ss["folding_model"] == "protenix" else None,
+                target_template=(
+                    _batch_tpl_cluster
+                    if _ss["folding_model"] == "protenix" and _ss.get("protenix_use_template")
+                    else None
+                ),
                 rosetta_relax=_ss["rosetta_relax"],
             )
             save_settings(_settings, _json_file)
@@ -617,8 +700,13 @@ if st.session_state.batch_queue:
         st.success(
             f"Saved {len(_cluster_json_paths)} configuration(s) + manifest to `{_bsave}`"
         )
-        st.subheader("SLURM batch command")
-        st.caption("Copy this to your cluster terminal:")
+        st.subheader("SLURM commands")
+        if _batch_protenix_mt_cmd:
+            st.markdown("**Step 1 — Template preparation** (run on a cluster login node with internet access):")
+            st.code(_batch_protenix_mt_cmd, language="bash")
+            st.markdown("**Step 2 — Binder generation** (run after Step 1 completes):")
+        else:
+            st.caption("Copy this to your cluster terminal:")
         st.code(
             batch_slurm_command(_manifest_cluster, len(_cluster_json_paths), int(_max_concurrent)),
             language="bash",
@@ -653,6 +741,23 @@ if st.button("💾 Save files + show SLURM commands", use_container_width=True):
         st.error(f"Cannot create directory {save_path}: {e}")
         st.stop()
 
+    _single_tpl_cluster = None
+    _single_protenix_mt_cmd = None
+    if folding_model == "protenix" and use_template and st.session_state.s_original_pdb_local:
+        _orig = Path(st.session_state.s_original_pdb_local)
+        if _orig.exists():
+            _tpl_copy = save_path / _orig.name
+            if not _tpl_copy.exists():
+                shutil.copy2(_orig, _tpl_copy)
+            _target_seq = _pdb_sequence(str(_tpl_copy), chain_id)
+            _tpl_input_local = save_path / f"{binder_name}_template_input.json"
+            with open(_tpl_input_local, "w") as _fj:
+                json.dump([{"name": "target", "sequences": [{"proteinChain": {"count": 1, "sequence": _target_seq, "modifications": []}}]}], _fj, indent=2)
+            _tpl_input_cluster = tr.to_cluster(str(_tpl_input_local))
+            _tpl_search_dir_cluster = tr.to_cluster(str(save_path / "template_search"))
+            _single_tpl_cluster = f"{_tpl_search_dir_cluster}/target/msa/0/hmmsearch.a3m"
+            _single_protenix_mt_cmd = f"python scripts/prepare_template.py -i {_tpl_input_cluster} -o {_tpl_search_dir_cluster}"
+
     saved_pairs = []
     for i, (linked, n_seed_i, rot, tilt_i) in enumerate(st.session_state.linked_structures):
         _spin_str = f"_rot{rot:.0f}" if len(st.session_state.linked_structures) > 1 else ""
@@ -686,6 +791,7 @@ if st.button("💾 Save files + show SLURM commands", use_container_width=True):
             folding_model=folding_model,
             protenix_model=protenix_model if folding_model == "protenix" else None,
             target_msa=target_msa if folding_model == "protenix" else None,
+            target_template=_single_tpl_cluster if folding_model == "protenix" else None,
             rosetta_relax=rosetta_relax,
         )
         save_settings(settings, json_local)
@@ -695,7 +801,12 @@ if st.button("💾 Save files + show SLURM commands", use_container_width=True):
 
     # Show SLURM commands
     st.subheader("SLURM commands")
-    st.caption("Copy these to your cluster terminal:")
+    if _single_protenix_mt_cmd:
+        st.markdown("**Step 1 — Template preparation** (run on a cluster login node with internet access):")
+        st.code(_single_protenix_mt_cmd, language="bash")
+        st.markdown("**Step 2 — Binder generation** (run after Step 1 completes):")
+    else:
+        st.caption("Copy these to your cluster terminal:")
     cmds = []
     for pdb_local, json_local, settings in saved_pairs:
         json_cluster = tr.to_cluster(json_local)

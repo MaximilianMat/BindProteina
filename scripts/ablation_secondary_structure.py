@@ -9,10 +9,22 @@ and produces a scatter plot of helix fraction vs. sheet fraction
 for every successful sample, colored by experimental condition.
 
 Usage:
+    # Single folder – auto-splits by fragment type:
     python scripts/ablation_secondary_structure.py \
         --input /path/to/ablation_folder \
         --output /path/to/output_folder \
         --chain B
+
+    # Multiple folders – auto-splits by source folder:
+    python scripts/ablation_secondary_structure.py \
+        --input /path/to/folder_A /path/to/folder_B \
+        --output /path/to/output_folder
+
+    # Explicit split control:
+    python scripts/ablation_secondary_structure.py \
+        --input /path/to/ablation_folder \
+        --output /path/to/output_folder \
+        --split-by fragment
 """
 
 import os
@@ -33,13 +45,34 @@ from tqdm import tqdm
 # CONDITION PARSING (reused from generate_ablation_results.py)
 # ============================================================
 
+# Fragment codes – ORDER MATTERS: longer/more-specific codes must come first
+# to prevent substring matches (e.g. '3hxc' must beat '3hx').
+_FRAGMENT_CODES = [
+    ("3hxc", "3_res_helix_custom"),
+    ("3btc", "3_res_beta_custom"),
+    ("3hx",  "3_res_helix"),
+    ("3bs",  "3_res_beta"),
+    ("3bt",  "3_res_beta"),
+    ("1gly", "single_gly"),
+    ("gly",  "single_gly"),
+    ("5hx",  "5_res_helix"),
+    ("alpha", "cath_alpha"),
+    ("beta",  "cath_beta"),
+    ("mixed", "cath_mixed"),
+    ("default", "cath_default"),
+]
+
+# Regex for flexible distance: supports '10A', '6_5A', '6-5A'
+_DIST_RE = re.compile(r"(\d+(?:[_-]\d+)?)A(?:_|/|$)")
+
+
 def parse_condition_from_path(path_str):
     """
     Infer experimental conditions from the directory path.
     Naming conventions:
       - sni -> inward, sno -> outward
-      - 8A, 10A, 12A, 14A -> distance
-      - gly -> single_gly, 3hx -> 3_res_helix, 3bt/3bs -> 3_res_beta, 5hx -> 5_res_helix
+      - 8A, 10A, 12A, 14A (or fractional like 6_5A) -> distance
+      - longer fragment codes checked before shorter ones to avoid false substring matches
       - _rotXX -> angle XX
     """
     orientation = "unknown"
@@ -48,29 +81,33 @@ def parse_condition_from_path(path_str):
     elif "sni" in path_str:
         orientation = "inward"
 
+    # Distance – supports fractional notation like 6_5A (= 6.5 Å)
     distance = 0
-    for d in [8, 10, 12, 14]:
-        if f"{d}A" in path_str:
-            distance = d
+    m = _DIST_RE.search(path_str)
+    if m:
+        raw = m.group(1)
+        try:
+            distance = float(raw.replace("_", ".").replace("-", "."))
+            if distance == int(distance):
+                distance = int(distance)
+        except ValueError:
+            pass
+
+    # Fragment – check longer codes first to avoid premature substring matches
+    fragment = "unknown"
+    for code, label in _FRAGMENT_CODES:
+        if code in path_str:
+            fragment = label
             break
 
-    fragment = "unknown"
-    if "gly" in path_str:
-        fragment = "single_gly"
-    elif "3hx" in path_str:
-        fragment = "3_res_helix"
-    elif "3bt" in path_str or "3bs" in path_str:
-        fragment = "3_res_beta"
-    elif "5hx" in path_str:
-        fragment = "5_res_helix"
-
+    # Rotation angle from _rotXX path components or inline rot\d+ token
     angle = 0
-    for part in Path(path_str).parts:
-        if part.startswith("_rot"):
-            try:
-                angle = int(part.replace("_rot", ""))
-            except ValueError:
-                pass
+    rot_m = re.search(r"_?rot(\d+)", path_str)
+    if rot_m:
+        try:
+            angle = int(rot_m.group(1))
+        except ValueError:
+            pass
 
     return orientation, angle, distance, fragment
 
@@ -130,26 +167,42 @@ def main():
     parser = argparse.ArgumentParser(
         description="Secondary structure scatter plot for ablation study (relaxed PDBs only)."
     )
-    parser.add_argument("--input", required=True, help="Base directory of ablation study")
+    parser.add_argument("--input", required=True, nargs='+', help="One or more input folders (folder basename = source label)")
     parser.add_argument("--output", required=True, help="Output folder for plots and CSV")
     parser.add_argument("--chain", default="B", help="Chain ID to analyze (default: B)")
     parser.add_argument("--residue", help="Optional hotspot residue filter (e.g. '60' for hs60)")
+    parser.add_argument(
+        "--split-by",
+        dest="split_by",
+        choices=["source", "fragment"],
+        default=None,
+        help=(
+            "Column to color and split plots by. "
+            "Defaults to 'source' when multiple input folders are provided, "
+            "otherwise 'fragment'."
+        ),
+    )
 
     args = parser.parse_args()
 
-    input_dir = Path(args.input)
+    input_dirs = [Path(p) for p in args.input]
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------------
     # 1. Discover all relaxed PDB files
     # --------------------------------------------------------
-    print(f"Scanning {input_dir} for relaxed/*.pdb ...")
-    pdb_files = sorted(input_dir.rglob("relaxed/*.pdb"))
-    pdb_files = [p for p in pdb_files if p.is_file() and p.parent.name == "relaxed"]
+    print(f"Scanning {[str(d) for d in input_dirs]} for relaxed/*.pdb ...")
+    # pdb_files is a list of (path, source_label) tuples
+    pdb_files = []
+    for input_dir in input_dirs:
+        source = input_dir.name
+        for p in sorted(input_dir.rglob("relaxed/*.pdb")):
+            if p.is_file() and p.parent.name == "relaxed":
+                pdb_files.append((p, source))
 
     if args.residue:
-        pdb_files = [p for p in pdb_files if f"hs{args.residue}" in str(p)]
+        pdb_files = [(p, s) for p, s in pdb_files if f"hs{args.residue}" in str(p)]
         print(f"  Filtered to hotspot residue hs{args.residue}")
 
     print(f"  Found {len(pdb_files)} successful PDB files.\n")
@@ -163,7 +216,7 @@ def main():
     # --------------------------------------------------------
     records = []
 
-    for pdb_path in tqdm(pdb_files, desc="Computing DSSP"):
+    for pdb_path, source in tqdm(pdb_files, desc="Computing DSSP"):
         result = compute_ss_fractions(str(pdb_path), chain_id=args.chain)
         if result is None:
             continue
@@ -176,6 +229,7 @@ def main():
         records.append({
             "pdb_file": pdb_path.name,
             "pdb_path": path_str,
+            "source": source,
             "helix_frac": helix_frac,
             "sheet_frac": sheet_frac,
             "loop_frac": loop_frac,
@@ -200,40 +254,39 @@ def main():
     print(f"Data saved to {csv_path}")
 
     # --------------------------------------------------------
-    # 3. Scatter plot: Helix % vs Sheet %
+    # Determine split column (source vs fragment)
     # --------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(10, 8))
+    split_col = args.split_by
+    if split_col is None:
+        split_col = "source" if df["source"].nunique() > 1 else "fragment"
+    print(f"Splitting plots by: '{split_col}'")
 
-    # Color by fragment type for the clearest biological signal
-    palette = {
-        "single_gly": "#e74c3c",
-        "3_res_helix": "#3498db",
-        "5_res_helix": "#2ecc71",
-        "3_res_beta": "#f39c12",
-    }
-    # Filter palette to only include fragments in the data
-    used_fragments = df["fragment"].unique()
-    palette = {k: v for k, v in palette.items() if k in used_fragments}
+    # --------------------------------------------------------
+    # 3. Scatter plot: Helix % vs Sheet %, colored by split_col
+    # --------------------------------------------------------
+    groups = sorted(df[split_col].unique())
+    palette = dict(zip(groups, sns.color_palette("Set2", n_colors=len(groups))))
+
+    fig, ax = plt.subplots(figsize=(10, 8))
 
     sns.scatterplot(
         data=df,
         x="helix_frac",
         y="sheet_frac",
-        hue="fragment",
+        hue=split_col,
         palette=palette,
-        alpha=0.7,
+        alpha=0.6,
         edgecolor="white",
         linewidth=0.3,
         s=50,
         ax=ax,
     )
 
-    # Add diagonal reference lines showing constant loop fraction
+    # Diagonal reference lines showing constant loop fraction
     for loop_pct in [0.2, 0.4, 0.6, 0.8]:
         x_vals = np.linspace(0, 1 - loop_pct, 50)
         y_vals = 1 - loop_pct - x_vals
         ax.plot(x_vals, y_vals, "--", color="gray", alpha=0.3, linewidth=0.8)
-        # Label the line
         ax.text(
             0.01, 1 - loop_pct - 0.02,
             f"{int(loop_pct*100)}% loop",
@@ -245,57 +298,65 @@ def main():
     ax.set_title("Secondary Structure of Successful Binders", fontsize=14)
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
-    ax.legend(title="Fragment Type", bbox_to_anchor=(1.05, 1), loc="upper left")
+    legend_title = split_col.replace("_", " ").title()
+    ax.legend(title=legend_title, bbox_to_anchor=(1.05, 1), loc="upper left")
 
     plt.tight_layout()
-    scatter_path = output_dir / "ss_helix_vs_sheet.png"
+    scatter_path = output_dir / f"ss_helix_vs_sheet_by_{split_col}.png"
     fig.savefig(scatter_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"Scatter plot saved to {scatter_path}")
 
     # --------------------------------------------------------
-    # 4. Faceted by fragment type
+    # 4. Faceted scatter: one panel per group in split_col
     # --------------------------------------------------------
-    n_fragments = len(used_fragments)
-    if n_fragments > 1:
-        fig, axes = plt.subplots(
-            1, n_fragments,
-            figsize=(5 * n_fragments, 5),
+    if len(groups) > 1:
+        ncols = min(4, len(groups))
+        nrows = (len(groups) + ncols - 1) // ncols
+        fig, axes_arr = plt.subplots(
+            nrows, ncols,
+            figsize=(5 * ncols, 5 * nrows),
             sharey=True, sharex=True,
             constrained_layout=True,
         )
-        if n_fragments == 1:
-            axes = [axes]
+        # Flatten to 1-D for uniform iteration
+        axes_flat = np.array(axes_arr).flatten() if len(groups) > 1 else [axes_arr]
 
-        for ax, frag in zip(axes, sorted(used_fragments)):
-            subset = df[df["fragment"] == frag]
+        for ax, grp in zip(axes_flat, groups):
+            subset = df[df[split_col] == grp]
             ax.scatter(
                 subset["helix_frac"],
                 subset["sheet_frac"],
-                c=palette.get(frag, "gray"),
+                c=[palette[grp]],
                 alpha=0.6,
                 edgecolor="white",
                 linewidth=0.3,
                 s=40,
             )
-            ax.set_title(f"{frag} (n={len(subset)})")
+            ax.set_title(f"{grp}\n(n={len(subset)})")
             ax.set_xlabel("Helix Fraction")
             ax.set_xlim(-0.02, 1.02)
             ax.set_ylim(-0.02, 1.02)
 
-        axes[0].set_ylabel("Sheet Fraction")
-        plt.suptitle("Secondary Structure by Fragment Type", fontsize=14)
+        # Hide any unused axes
+        for ax in axes_flat[len(groups):]:
+            ax.set_visible(False)
 
-        facet_path = output_dir / "ss_faceted_by_fragment.png"
+        for ax in axes_flat[::ncols]:
+            ax.set_ylabel("Sheet Fraction")
+
+        plt.suptitle(f"Secondary Structure by {legend_title}", fontsize=14)
+
+        facet_path = output_dir / f"ss_faceted_by_{split_col}.png"
         fig.savefig(facet_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"Faceted plot saved to {facet_path}")
 
     # --------------------------------------------------------
-    # 5. Summary statistics
+    # 5. Summary statistics per split_col group
     # --------------------------------------------------------
-    print("\n=== PER-FRAGMENT SUMMARY ===")
-    summary = df.groupby("fragment").agg(
+    print(f"\n=== PER-{split_col.upper()} SUMMARY ===")
+    summary = df.groupby(split_col).agg(
         n_samples=("helix_frac", "count"),
         mean_helix=("helix_frac", "mean"),
         std_helix=("helix_frac", "std"),
@@ -306,7 +367,7 @@ def main():
     ).round(3)
     print(summary)
 
-    summary_path = output_dir / "ss_summary.csv"
+    summary_path = output_dir / f"ss_summary_by_{split_col}.csv"
     summary.to_csv(summary_path)
     print(f"\nSummary saved to {summary_path}")
 

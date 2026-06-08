@@ -198,7 +198,13 @@ def main():
              "file (protenix mt is run online to find matching PDB templates) or a pre-computed "
              ".a3m/.hhr template file. Enables --use_template true in Protenix."
     )
-    
+    parser.add_argument(
+        "--protenix_n_diffusion_samples",
+        type=int,
+        default=None,
+        help="Number of diffusion samples per design for Protenix (default: 5; use 3 for ~40%% speedup)"
+    )
+
     args = parser.parse_args()
     
     # Load settings
@@ -222,6 +228,7 @@ def main():
 
     folding_model = get_setting("folding_model", args.folding_model, "af2")
     protenix_model = get_setting("protenix_model", args.protenix_model, "protenix-v2")
+    protenix_n_diffusion_samples = int(get_setting("protenix_n_diffusion_samples", args.protenix_n_diffusion_samples, 5))
     target_msa = get_setting("target_msa", args.target_msa)
     msa_db = get_setting("msa_db", args.msa_db)
     target_template = get_setting("target_template", args.target_template)
@@ -247,6 +254,13 @@ def main():
             f"Filter settings not found at {filter_settings_path}. "
             "Proceeding without JSON-based filtering."
         )
+    
+    # Extract CATH fold conditioning parameters
+    cath_codes = lp_settings.get("cath_codes") or settings.get("cath_codes", None)
+    len_cath_code_path = lp_settings.get("len_cath_code_path") or settings.get("len_cath_code_path", None)
+    cath_code_level = lp_settings.get("cath_code_level") or settings.get("cath_code_level", None)
+    if len_cath_code_path:
+        len_cath_code_path = fix_path(len_cath_code_path)
     
     # Required fields
     target_pdb = fix_path(settings["starting_pdb"])
@@ -349,6 +363,9 @@ def main():
     logger.info(f"  batch_size: {batch_size}")
     logger.info(f"  direct_binder_mode: {direct_binder_mode}")
     logger.info(f"  linked_input_mode: {linked_input_mode}")
+    logger.info(f"  cath_codes: {cath_codes}")
+    logger.info(f"  len_cath_code_path: {len_cath_code_path}")
+    logger.info(f"  cath_code_level: {cath_code_level}")
     
     # Create output directory
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
@@ -484,6 +501,9 @@ def main():
             direct_binder_mode=True,
             binder_target_nres=target_length,
             max_batch_size=batch_size,
+            cath_codes=cath_codes,
+            len_cath_code_path=len_cath_code_path,
+            cath_code_level=cath_code_level,
         )
         all_generated_pdbs.extend(direct_samples)
         logger.info(f"Direct mode: Generated {len(direct_samples)} samples")
@@ -502,7 +522,10 @@ def main():
             contig_string=contig_string,
             design_id="linked",
             direct_binder_mode=False,
-            max_batch_size=batch_size
+            max_batch_size=batch_size,
+            cath_codes=cath_codes,
+            len_cath_code_path=len_cath_code_path,
+            cath_code_level=cath_code_level,
         )
         all_generated_pdbs.extend(linked_samples)
         logger.info(f"Linked mode: Generated {len(linked_samples)} samples")
@@ -608,6 +631,7 @@ def main():
                 target_msa=target_msa,
                 msa_db_path=msa_db,
                 target_template=target_template,
+                n_diffusion_samples=protenix_n_diffusion_samples,
             )
         except Exception as e:
             logger.error(f"Modular scoring failed: {e}")

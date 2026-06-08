@@ -31,7 +31,8 @@ import argparse
 
 # Fragment codes we recognise (order matters: longer codes first)
 _FRAGMENT_CODES = {
-    "3hxc": "3_res_helix_capped",
+    "3btc": "3_res_beta_custom",
+    "3hxc": "3_res_helix_custom",
     "3hx":  "3_res_helix",
     "5hx":  "5_res_helix",
     "3gx":  "3_res_gly_helix",
@@ -48,13 +49,14 @@ _ORIENTATION_CODES = {
     "negy":      "negy",
     "xneg":      "xneg",
     "xz":        "xz",
+    "xy":        "xy",
     "x":         "x",
     "z":         "z",
     "reference": "reference",
 }
 
-# Distance pattern: handles integer (10A) and fractional (6_5A → 6.5)
-_DIST_RE = re.compile(r"_(\d+(?:_\d+)?)A(?:_|$)")
+# Distance pattern: handles integer (10A) and fractional (6_5A or 6-5A → 6.5)
+_DIST_RE = re.compile(r"_(\d+(?:[_-]\d+)?)A(?:_|$)")
 
 # Rotation and tilt
 _ROT_RE  = re.compile(r"_?rot(\d+)")
@@ -69,7 +71,7 @@ def _parse_distance(s: str) -> str | None:
     m = _DIST_RE.search(s)
     if m:
         raw = m.group(1)
-        return raw.replace("_", ".")  # 6_5 → 6.5
+        return raw.replace("_", ".").replace("-", ".")  # 6_5 or 6-5 → 6.5
     return None
 
 
@@ -137,11 +139,11 @@ def parse_condition_from_path(path_str):
     
     # Distance – supports fractional like 6_5A (6.5 Å)
     distance = 0
-    dist_match = re.search(r"(\d+_?\d*)A", path_str)
+    dist_match = re.search(r"(\d+[_-]?\d*)A", path_str)
     if dist_match:
         d_str = dist_match.group(1)
-        if "_" in d_str:
-            distance = float(d_str.replace("_", "."))
+        if "_" in d_str or "-" in d_str:
+            distance = float(d_str.replace("_", ".").replace("-", "."))
         else:
             distance = int(d_str)
     

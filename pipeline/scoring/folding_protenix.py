@@ -42,6 +42,16 @@ def _resolve_protenix_cmd() -> str:
     return "protenix"
 
 
+def _resolve_kalign_cmd() -> Optional[str]:
+    """Return the kalign binary path from the same bin/ dir as protenix, or None if not found."""
+    protenix = _resolve_protenix_cmd()
+    candidate = os.path.join(os.path.dirname(protenix), "kalign")
+    if os.path.exists(candidate):
+        return candidate
+    import shutil
+    return shutil.which("kalign")
+
+
 def _attach_msa_to_chain(chain: dict, target_msa_path: Optional[str]) -> None:
     """
     Attach precomputed MSA to a proteinChain dict in-place.
@@ -273,6 +283,7 @@ def run_protenix_refolding(
     seed: int = 42,
     target_msa_path: Optional[str] = None,
     target_template_path: Optional[str] = None,
+    n_diffusion_samples: int = 5,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """
     Run Protenix structure prediction on a single complex PDB.
@@ -319,10 +330,15 @@ def run_protenix_refolding(
         "-o", str(work_dir),
         "-n", model_name,
         "--seeds", str(seed),
+        "--sample", str(n_diffusion_samples),
         "--use_msa", "true",       # precomputed MSA in JSON; suppress per-sample MSA search
         "--use_template", use_template_flag,
         "--enable_cache", "true",
     ]
+    if target_template_path:
+        kalign = _resolve_kalign_cmd()
+        if kalign:
+            cmd += ["--kalign_binary_path", kalign]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
@@ -422,6 +438,7 @@ def run_protenix_refolding_batch(
     target_template_path: Optional[str] = None,
     chunk_size: int = 35,
     fetch_all_msas: bool = False,
+    n_diffusion_samples: int = 5,
 ) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
     """
     Run Protenix structure prediction on multiple complex PDBs using chunked batches.
@@ -586,11 +603,16 @@ def run_protenix_refolding_batch(
             "-o", str(chunk_dir),
             "-n", model_name,
             "--seeds", str(seed),
+            "--sample", str(n_diffusion_samples),
             "--use_msa", "true",
             "--use_template", "true" if resolved_template_path else "false",
             "--enable_cache", "true",
         ]
-        
+        if resolved_template_path:
+            kalign = _resolve_kalign_cmd()
+            if kalign:
+                cmd += ["--kalign_binary_path", kalign]
+
         if i == 0:
             logger.info(f"Protenix command: {' '.join(cmd)}")
 
@@ -599,7 +621,7 @@ def run_protenix_refolding_batch(
         try:
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if process.returncode != 0:
-                logger.error(f"Chunk {chunk_idx} exited {process.returncode}. Stderr: {process.stderr[:500]}")
+                logger.error(f"Chunk {chunk_idx} exited {process.returncode}. Stderr: {process.stderr[-3000:]}")
 
             for cp in chunk_payload:
                 design_name = cp["name"]
@@ -654,6 +676,7 @@ def run_protenix_from_json_payload(
     target_template_path: Optional[str] = None,
     chunk_size: int = 40,
     fetch_all_msas: bool = False,
+    n_diffusion_samples: int = 5,
 ) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
     """
     Run Protenix on complexes defined by a Protenix-style input JSON list.
@@ -820,11 +843,16 @@ def run_protenix_from_json_payload(
             "-o", str(chunk_dir),
             "-n", model_name,
             "--seeds", str(seed),
+            "--sample", str(n_diffusion_samples),
             "--use_msa", "true",
             "--use_template", "true" if resolved_template_path else "false",
             "--enable_cache", "true",
         ]
-        
+        if resolved_template_path:
+            kalign = _resolve_kalign_cmd()
+            if kalign:
+                cmd += ["--kalign_binary_path", kalign]
+
         if i == 0:
             logger.info(f"Protenix command: {' '.join(cmd)}")
 
@@ -833,7 +861,7 @@ def run_protenix_from_json_payload(
         try:
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if process.returncode != 0:
-                logger.error(f"Chunk {chunk_idx} exited {process.returncode}. Stderr: {process.stderr[:500]}")
+                logger.error(f"Chunk {chunk_idx} exited {process.returncode}. Stderr: {process.stderr[-3000:]}")
 
             for cp in chunk_payload:
                 design_name = cp["name"]

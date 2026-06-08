@@ -32,6 +32,7 @@ def score_complexes(
     target_template: Optional[str] = None,
     force_rosetta: bool = False,
     fetch_all_msas: bool = False,
+    n_diffusion_samples: int = 5,
 ):
     """
     Universal 2-stage scoring orchestrator.
@@ -51,10 +52,10 @@ def score_complexes(
             non_pairing.a3m) for the target protein (Chain A).  A single .a3m file is also
             accepted for backward compatibility.
         target_template: Optional path to a structural template for the target chain.
-            Accepts: a .a3m or .hhr file (used directly as templatesPath), or a PDB/CIF
-            file (Chain A sequence is extracted and protenix mt is run online to find
-            matching PDB templates).  When provided, --use_template true is passed to
-            protenix pred, which biases the target conformation towards the known structure.
+            Must be a .a3m or .hhr file (Protenix templatesPath format). Generate it
+            with `protenix mt -i <input.json> -o <out_dir> -m protenix` on a node with
+            internet access; the result is at <out_dir>/target/msa/hmmsearch.a3m.
+            When provided, --use_template true is passed to protenix pred.
         fetch_all_msas: Whether to fetch MSAs for all chains.
     """
     if torch.cuda.is_available():
@@ -123,31 +124,18 @@ def score_complexes(
             print(f"WARNING: MSA setup failed: {e}. Proceeding without MSA.")
             target_msa = None
 
-    # ── Resolve / generate template if a PDB/CIF was supplied ────────
-    resolved_template: Optional[str] = target_template
-    if folding_model == "protenix" and target_template:
-        tp = Path(target_template)
-        if tp.suffix.lower() in (".pdb", ".cif", ".mmcif"):
-            from pipeline.scoring.folding_protenix import prepare_template_from_pdb
-            print(f"Generating structural templates from: {target_template}")
-            start_tpl = time.time()
-            try:
-                # prepare_template_from_pdb runs protenix mt online and returns
-                # (msa_dir, template_a3m_path).  We take the template file;
-                # if MSA was not yet generated we also use the resulting msa_dir.
-                msa_dir, tpl_file = prepare_template_from_pdb(
-                    pdb_or_cif_path=target_template,
-                    output_dir=out_path / "target_template",
-                )
-                resolved_template = tpl_file
-                if target_msa is None and msa_dir:
-                    target_msa = msa_dir
-                    print(f"Also using MSA from template search: {msa_dir}")
-                print(f"Template file: {tpl_file} ({time.time()-start_tpl:.1f}s)")
-            except Exception as e:
-                print(f"WARNING: Template generation failed: {e}. Proceeding without template.")
-                resolved_template = None
-        # .a3m / .hhr files are passed through unchanged
+    # ── Resolve template ─────────────────────────────────────────────
+    # Pass the file directly to Protenix as templatesPath.
+    # .pdb/.cif files are used as-is; .a3m/.hhr files are passed through unchanged.
+    # (We do NOT run protenix mt here — that requires internet access and searches
+    # for homologous structures, which is wrong when the user has already supplied
+    # the exact crystal structure they want to use as a template.)
+    resolved_template: Optional[str] = target_template if target_template and Path(target_template).exists() else None
+    if target_template and not resolved_template:
+        print(f"WARNING: Template file not found: {target_template}. Proceeding without template.")
+    if resolved_template and Path(resolved_template).suffix.lower() not in (".a3m", ".hhr"):
+        print(f"WARNING: Template file {resolved_template} is not .a3m/.hhr — Protenix only supports those formats. Proceeding without template.")
+        resolved_template = None
 
     # ── Stage 1: Folding ─────────────────────────────────────────────
     start_time_folding = time.time()
@@ -230,6 +218,7 @@ def score_complexes(
                     target_msa_path=target_msa,
                     target_template_path=resolved_template,
                     fetch_all_msas=fetch_all_msas,
+                    n_diffusion_samples=n_diffusion_samples,
                 )
                 
                 for design_name, folded_pdb, metrics in batch_results:
@@ -562,23 +551,12 @@ def score_from_protenix_json(
         elapsed_msa = time.time() - start_msa
 
     # ── Resolve template ───────────────────────────────────────────────
-    resolved_template: Optional[str] = target_template
-    if target_template:
-        tp = Path(target_template)
-        if tp.suffix.lower() in (".pdb", ".cif", ".mmcif"):
-            from pipeline.scoring.folding_protenix import prepare_template_from_pdb
-            print(f"Generating structural templates from: {target_template}")
-            try:
-                msa_dir, tpl_file = prepare_template_from_pdb(
-                    pdb_or_cif_path=target_template,
-                    output_dir=out_path / "target_template",
-                )
-                resolved_template = tpl_file
-                if target_msa is None and msa_dir:
-                    target_msa = msa_dir
-            except Exception as e:
-                print(f"WARNING: Template generation failed: {e}. Proceeding without template.")
-                resolved_template = None
+    resolved_template: Optional[str] = target_template if target_template and Path(target_template).exists() else None
+    if target_template and not resolved_template:
+        print(f"WARNING: Template file not found: {target_template}. Proceeding without template.")
+    if resolved_template and Path(resolved_template).suffix.lower() not in (".a3m", ".hhr"):
+        print(f"WARNING: Template file {resolved_template} is not .a3m/.hhr — Protenix only supports those formats. Proceeding without template.")
+        resolved_template = None
 
     # ── Stage 1: Protenix folding ──────────────────────────────────────
     from pipeline.scoring.folding_protenix import run_protenix_from_json_payload
