@@ -78,6 +78,51 @@ def make_viewer(
     return view
 
 
+def make_sweep_preview_viewer(
+    target_pdb: str,
+    hotspot_res_ids: Optional[List[int]] = None,
+    placement_spheres: Optional[List[dict]] = None,
+    width: int = 780,
+    height: int = 480,
+) -> py3Dmol.view:
+    """
+    Show target with hotspot highlights and colored spheres at seed placement points.
+
+    placement_spheres: list of dicts with keys x, y, z, color, radius.
+      Color convention:
+        orange (#f4a261) → centroid anchor
+        yellow (#ffd166) → individual hotspot residue anchor
+        teal   (#4ecdc4) → Fibonacci sphere anchor
+    """
+    view = py3Dmol.view(width=width, height=height)
+    view.addModel(target_pdb, "pdb")
+    view.setStyle({}, {"cartoon": {"color": "lightgray", "opacity": 0.85}})
+    view.addStyle({}, {"stick": {"color": "lightgray", "radius": 0.05, "opacity": 0.3}})
+
+    if hotspot_res_ids:
+        for res_id in hotspot_res_ids:
+            view.addStyle(
+                {"resi": str(res_id)},
+                {"sphere": {"color": "#e63946", "opacity": 0.5, "radius": 1.4}},
+            )
+        view.addStyle(
+            {"resi": [str(r) for r in hotspot_res_ids]},
+            {"stick": {"color": "#e63946", "radius": 0.15}},
+        )
+
+    for sp in (placement_spheres or []):
+        view.addSphere({
+            "center": {"x": sp["x"], "y": sp["y"], "z": sp["z"]},
+            "radius": sp.get("radius", 1.0),
+            "color":  sp["color"],
+            "opacity": 0.75,
+        })
+
+    view.zoomTo()
+    view.spin(False)
+    return view
+
+
 def view_to_html(view: py3Dmol.view) -> str:
     """Extract embeddable HTML string from a py3Dmol view."""
     return view._make_html()

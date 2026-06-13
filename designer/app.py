@@ -26,6 +26,7 @@ import streamlit.components.v1 as components
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from designer.placement.anchors import (
+    compute_surface_normal,
     direction_from_preset,
     get_anchor_ca,
     hotspot_centroid,
@@ -35,7 +36,7 @@ from designer.placement.anchors import (
     parse_hotspot_string,
     residue_ids_in_chain,
 )
-from designer.placement.clashes import clash_summary, find_clashes
+from designer.placement.clashes import CLASH_THRESHOLD_DEFAULT, clash_summary, find_clashes, has_clash
 from designer.placement.placer import (
     generate_candidates,
     place_seed,
@@ -43,6 +44,7 @@ from designer.placement.placer import (
     structure_to_pdb_string,
 )
 from designer.placement.seeds import SEED_LABELS, SEED_TYPES, get_seed_structure
+from designer.placement.sweep import count_sweep_configs, generate_sweep_configs
 from designer.settings.builder import (
     batch_slurm_command,
     build_settings,
@@ -52,7 +54,7 @@ from designer.settings.builder import (
     slurm_command,
 )
 from designer.settings.templates import get_defaults, get_path_translator
-from designer.viewer.render import make_linked_viewer, make_viewer, view_to_html
+from designer.viewer.render import make_linked_viewer, make_sweep_preview_viewer, make_viewer, view_to_html
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -167,6 +169,20 @@ _STATE_DEFAULTS: dict = {
     # placement angles
     "s_rotation_deg":         0,
     "s_tilt_deg":             0,
+    # sweep
+    "s_sweep_use_centroid":       True,
+    "s_sweep_use_individual":     True,
+    "s_sweep_use_sphere":         False,
+    "s_sweep_sphere_radius":      5.0,
+    "s_sweep_sphere_npoints":     12,
+    "s_sweep_cone_angles_str":    "0,45",
+    "s_sweep_n_azimuths":         8,
+    "s_sweep_distances_str":      "12,18",
+    "s_sweep_n_spins":            4,
+    "s_sweep_tilts_str":          "0",
+    "s_sweep_samples_per_config": 100,
+    "current_direction":          None,
+    "sweep_preview_points":       None,
 }
 
 for key, default in _STATE_DEFAULTS.items():
@@ -349,6 +365,8 @@ if st.button("🔬 Preview placement", use_container_width=True):
             else:
                 direction = direction_from_preset(direction_choice, target, anchor_pos)
 
+            st.session_state.current_direction = direction
+
             # --- Generate ---
             if n_candidates == 1:
                 linked, n_seed = place_seed(
@@ -391,7 +409,7 @@ if st.session_state.linked_pdb_strings:
         if clashes:
             st.warning(f"⚠️ {clash_summary(clashes)}")
         else:
-            st.success("✅ No steric clashes detected.")
+            st.success(f"✅ No contacts within {CLASH_THRESHOLD_DEFAULT:.0f} Å.")
 
         view = make_linked_viewer(
             pdb_str, tl,
@@ -420,6 +438,275 @@ if st.session_state.linked_pdb_strings:
                 )
                 _show_viewer(view_to_html(view), height=420)
                 st.caption("🖱 Left-drag: rotate · Right-drag: pan/translate · Scroll: zoom")
+
+# ---------------------------------------------------------------------------
+# ── Section 3b: Parameter Sweep ──
+# ---------------------------------------------------------------------------
+
+st.header("3b · Parameter Sweep")
+st.caption(
+    "Systematically probe the space around hotspot residues. "
+    "Run short scouting rounds (low samples/config) to learn where good seeds live, "
+    "then iterate with higher budget on the winners."
+)
+
+if not hotspot_ids:
+    st.info("Set hotspot residues in Section 2 to enable the parameter sweep.")
+elif target is None:
+    st.info("Load a target PDB in Section 1 first.")
+else:
+    # ── Anchor positions ──────────────────────────────────────────────────────
+    st.subheader("Anchors")
+    _sc1, _sc2 = st.columns(2)
+    with _sc1:
+        sw_centroid   = st.checkbox("Hotspot centroid", key="s_sweep_use_centroid")
+        sw_individual = st.checkbox("Individual hotspot residues", key="s_sweep_use_individual")
+    with _sc2:
+        sw_sphere = st.checkbox(
+            "Fibonacci sphere around centroid",
+            key="s_sweep_use_sphere",
+            help="Evenly-distributed anchor points on a sphere — unbiased baseline.",
+        )
+        if sw_sphere:
+            _sp1, _sp2 = st.columns(2)
+            with _sp1:
+                st.number_input("Sphere points", min_value=4, max_value=50, step=1,
+                                key="s_sweep_sphere_npoints")
+            with _sp2:
+                st.number_input("Sphere radius (Å)", min_value=2.0, max_value=20.0, step=0.5,
+                                key="s_sweep_sphere_radius")
+
+    # ── Placement directions (cone model) ─────────────────────────────────────
+    st.subheader("Placement direction")
+    st.caption(
+        "Direction = cos(θ)·normal + sin(θ)·lateral(φ).  "
+        "θ=0° → seed directly above hotspot.  "
+        "θ=45° → seed at a 45° angle (equal outward + lateral — the (1,0,1) style).  "
+        "φ sweeps 360° around the normal for each non-zero θ."
+    )
+    _dc1, _dc2, _dc3 = st.columns(3)
+    with _dc1:
+        sw_cone_angles_str = st.text_input(
+            "Cone angles θ (°, comma-separated)",
+            key="s_sweep_cone_angles_str",
+            help="e.g. '0,45' or '0,30,45,60'",
+        )
+        try:
+            sw_cone_angles = sorted({float(x.strip()) for x in sw_cone_angles_str.split(",") if x.strip()})
+            if not sw_cone_angles:
+                sw_cone_angles = [0.0]
+        except ValueError:
+            st.error("Invalid cone angles.")
+            sw_cone_angles = [0.0]
+    with _dc2:
+        sw_n_azimuths = st.slider(
+            "Azimuths φ per cone angle",
+            min_value=4, max_value=24, step=2,
+            key="s_sweep_n_azimuths",
+            help="Number of equally spaced lateral directions per non-zero cone angle.",
+        )
+    with _dc3:
+        sw_distances_str = st.text_input(
+            "Distances (Å, comma-separated)",
+            key="s_sweep_distances_str",
+            help="e.g. '12,18' — 8–16 Å has little influence, keep to 1–2 values.",
+        )
+        try:
+            sw_distances = sorted({float(x.strip()) for x in sw_distances_str.split(",") if x.strip()})
+            if not sw_distances:
+                sw_distances = [12.0]
+        except ValueError:
+            st.error("Invalid distances.")
+            sw_distances = [12.0]
+
+    # ── Seed orientation ──────────────────────────────────────────────────────
+    _oc1, _oc2 = st.columns(2)
+    with _oc1:
+        sw_n_spins = st.slider(
+            "Seed spin orientations per direction",
+            min_value=1, max_value=16, step=1,
+            key="s_sweep_n_spins",
+            help="Evenly spaced spin rotations around the placement direction axis.",
+        )
+    with _oc2:
+        sw_tilts_str = st.text_input(
+            "Tilt angles (°, comma-separated)",
+            key="s_sweep_tilts_str",
+            help="e.g. '0,45,90' — tilt rotates the seed around a perpendicular to the placement direction.",
+        )
+        try:
+            sw_tilts = sorted({float(x.strip()) for x in sw_tilts_str.split(",") if x.strip()})
+            if not sw_tilts:
+                sw_tilts = [0.0]
+        except ValueError:
+            st.error("Invalid tilt angles.")
+            sw_tilts = [0.0]
+
+    # ── Budget ────────────────────────────────────────────────────────────────
+    sw_samples = st.number_input(
+        "Samples per config",
+        min_value=10, max_value=2000, step=10,
+        key="s_sweep_samples_per_config",
+        help="Keep low (50–200) for scouting. Raise once you've found promising regions.",
+    )
+
+    # ── Preview ───────────────────────────────────────────────────────────────
+    _sw_n_cone_anchors = (
+        (1 if sw_centroid else 0)
+        + (len(hotspot_ids) if sw_individual else 0)
+    )
+    _sw_n_sphere_anchors = int(st.session_state.s_sweep_sphere_npoints) if sw_sphere else 0
+    _sw_n_dirs = sum(1 if a <= 1e-3 else sw_n_azimuths for a in sw_cone_angles)
+    _sw_n_configs = count_sweep_configs(
+        n_cone_anchors=_sw_n_cone_anchors,
+        n_sphere_anchors=_sw_n_sphere_anchors,
+        cone_angles=sw_cone_angles,
+        n_azimuths=sw_n_azimuths,
+        n_distances=len(sw_distances),
+        n_spins=sw_n_spins,
+        n_tilts=len(sw_tilts),
+    )
+    _sw_info_parts = []
+    if _sw_n_cone_anchors:
+        _sw_info_parts.append(f"**{_sw_n_cone_anchors} cone anchors** × **{_sw_n_dirs} dirs**")
+    if _sw_n_sphere_anchors:
+        _sw_info_parts.append(f"**{_sw_n_sphere_anchors} sphere anchors** (own direction)")
+    st.info(
+        " + ".join(_sw_info_parts)
+        + f" × **{len(sw_distances)} dist** × **{sw_n_spins} spins** × **{len(sw_tilts)} tilts**"
+        + f" = **{_sw_n_configs} configs** × {sw_samples} = **{_sw_n_configs * sw_samples:,} total samples**"
+    )
+
+    # ── Generate ──────────────────────────────────────────────────────────────
+    if st.button("🎯 Generate sweep → add to batch queue", use_container_width=True):
+        if st.session_state.current_direction is None:
+            st.error("Run a placement in Section 3 first to register the surface normal direction.")
+            st.stop()
+
+        _sw_centroid = hotspot_centroid(target, hotspot_ids)
+        _sw_normal   = compute_surface_normal(target, _sw_centroid)
+        _sw_hotspot_cas = [
+            target[(target.res_id == _rid) & (target.atom_name == "CA")].coord[0]
+            for _rid in hotspot_ids
+            if len(target[(target.res_id == _rid) & (target.atom_name == "CA")]) > 0
+        ]
+        _sw_binder_name = st.session_state.s_binder_name
+        _sw_output_dir  = st.session_state.s_output_dir
+
+        _sw_configs = generate_sweep_configs(
+            centroid=_sw_centroid,
+            surface_normal=_sw_normal,
+            hotspot_cas=_sw_hotspot_cas,
+            seed_type=seed_type,
+            custom_pdb=(custom_pdb_input or None) if seed_type == "custom" else None,
+            use_centroid=bool(sw_centroid),
+            use_individual=bool(sw_individual),
+            use_sphere=bool(sw_sphere),
+            sphere_n=int(st.session_state.s_sweep_sphere_npoints),
+            sphere_r=float(st.session_state.s_sweep_sphere_radius),
+            cone_angles=sw_cone_angles,
+            n_azimuths=int(sw_n_azimuths),
+            distances=sw_distances,
+            n_spins=int(sw_n_spins),
+            tilts=sw_tilts,
+        )
+
+        _sw_added, _sw_skipped = 0, []
+        _existing_labels = {item["label"] for item in st.session_state.batch_queue}
+        for _cfg in _sw_configs:
+            try:
+                _sw_linked, _sw_nseed = place_seed(
+                    target,
+                    _cfg["anchor_pos"], _cfg["direction"], _cfg["distance"],
+                    _cfg["seed_type"], _cfg["rotation_deg"], _cfg["tilt_deg"],
+                    _cfg["custom_pdb"],
+                )
+                _sw_seed_atoms = _sw_linked[_sw_linked.res_id > st.session_state.target_length]
+                if has_clash(target, _sw_seed_atoms):
+                    _sw_skipped.append(
+                        f"{_cfg['anchor_label']}: seed within {CLASH_THRESHOLD_DEFAULT:.0f} Å of target"
+                    )
+                    continue
+
+                _sw_suffix = f"_sw_{_cfg['anchor_label']}_s{_cfg['rotation_deg']:.0f}"
+                _sw_label = _sw_binder_name + _sw_suffix
+                if _sw_label in _existing_labels:
+                    _sw_skipped.append(
+                        f"{_cfg['anchor_label']}: already in batch queue (duplicate)"
+                    )
+                    continue
+
+                st.session_state.batch_queue.append({
+                    "label":            _sw_label,
+                    "suffix":           _sw_suffix,
+                    "base_binder_name": _sw_binder_name,
+                    "base_output_dir":  _sw_output_dir,
+                    "n_seed":           _sw_nseed,
+                    "rotation":         _cfg["rotation_deg"],
+                    "tilt":             _cfg["tilt_deg"],
+                    "pdb_string":       structure_to_pdb_string(_sw_linked),
+                    "settings_snapshot": {
+                        "n_samples":         int(sw_samples),
+                        "batch_size":        int(st.session_state.s_batch_size),
+                        "binder_length_min": int(st.session_state.s_binder_len_min),
+                        "binder_length_max": int(st.session_state.s_binder_len_max),
+                        "keep_linker_end_n": int(st.session_state.s_keep_linker_end_n),
+                        "laproteina_mode":   st.session_state.s_laproteina_mode,
+                        "rosetta_relax":     bool(st.session_state.s_rosetta_relax),
+                        "checkpoint_path":   st.session_state.s_checkpoint_path,
+                        "autoencoder_path":  st.session_state.s_autoencoder_path,
+                        "folding_model":     st.session_state.s_folding_model,
+                        "protenix_model":    st.session_state.s_protenix_model,
+                        "target_msa":        st.session_state.s_target_msa,
+                        "hotspot_str":       hotspot_str.strip(),
+                        "target_length":     st.session_state.target_length,
+                    },
+                })
+                _existing_labels.add(_sw_label)
+                _sw_added += 1
+            except Exception as _e:
+                _sw_skipped.append(f"{_cfg['anchor_label']}: {_e}")
+
+        if _sw_skipped:
+            with st.expander(f"{len(_sw_skipped)} configs skipped"):
+                st.text("\n".join(_sw_skipped))
+        st.success(
+            f"Added **{_sw_added}** sweep configs to batch queue "
+            f"({len(_sw_configs) - _sw_added} skipped). "
+            f"Total in queue: **{len(st.session_state.batch_queue)}**."
+        )
+
+        # Build placement point spheres (deduplicate by anchor+direction+distance, ignore spin)
+        _anchor_color = {"cen": "#f4a261", "hs": "#ffd166", "sp": "#4ecdc4"}
+        _seen_pts: set = set()
+        _preview_pts = []
+        for _cfg in _sw_configs:
+            _pt_key = (_cfg["anchor_label"], _cfg["distance"])
+            if _pt_key in _seen_pts:
+                continue
+            _seen_pts.add(_pt_key)
+            _pt = _cfg["anchor_pos"] + _cfg["direction"] * _cfg["distance"]
+            _lbl = _cfg["anchor_label"]
+            _col = next(
+                (v for k, v in _anchor_color.items() if _lbl.startswith(k)),
+                "#aaaaaa",
+            )
+            _preview_pts.append({"x": float(_pt[0]), "y": float(_pt[1]), "z": float(_pt[2]),
+                                  "color": _col, "radius": 1.2})
+        st.session_state.sweep_preview_points = _preview_pts
+
+    # ── Sweep placement preview viewer ────────────────────────────────────────
+    if st.session_state.sweep_preview_points and st.session_state.target_pdb_str:
+        st.caption(
+            "🟠 centroid · 🟡 individual hotspot residue · 🩵 Fibonacci sphere  "
+            "— each sphere is a seed placement point"
+        )
+        _pv = make_sweep_preview_viewer(
+            st.session_state.target_pdb_str,
+            hotspot_res_ids=hotspot_ids,
+            placement_spheres=st.session_state.sweep_preview_points,
+        )
+        _show_viewer(view_to_html(_pv), height=460)
 
 # ---------------------------------------------------------------------------
 # ── Section 4: LaProteina Settings ──
@@ -542,6 +829,8 @@ st.caption(
 if st.button("➕ Add current placements to batch queue", use_container_width=True):
     _multi = len(st.session_state.linked_structures) > 1
     _added = 0
+    _skipped = 0
+    _existing_labels = {item["label"] for item in st.session_state.batch_queue}
     for (_linked_s, _n_seed_i, _rot, _tilt), _pdb_str in zip(
         st.session_state.linked_structures, st.session_state.linked_pdb_strings
     ):
@@ -549,6 +838,9 @@ if st.button("➕ Add current placements to batch queue", use_container_width=Tr
         _tilt_str = f"_tilt{_tilt:.0f}" if abs(_tilt) > 0.5 else ""
         _suffix = _spin_str + _tilt_str
         _label = f"{binder_name}{_suffix}"
+        if _label in _existing_labels:
+            _skipped += 1
+            continue
         st.session_state.batch_queue.append({
             "label":            _label,
             "suffix":           _suffix,
@@ -577,8 +869,12 @@ if st.button("➕ Add current placements to batch queue", use_container_width=Tr
                 "target_length":     st.session_state.target_length,
             },
         })
+        _existing_labels.add(_label)
         _added += 1
-    st.success(f"Added {_added} placement(s). Queue total: {len(st.session_state.batch_queue)}")
+    _msg = f"Added {_added} placement(s). Queue total: {len(st.session_state.batch_queue)}"
+    if _skipped > 0:
+        _msg += f" ({_skipped} duplicate(s) skipped)"
+    st.success(_msg)
 
 # Queue display
 if st.session_state.batch_queue:
