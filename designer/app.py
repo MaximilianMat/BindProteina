@@ -183,6 +183,9 @@ _STATE_DEFAULTS: dict = {
     "s_sweep_samples_per_config": 100,
     "current_direction":          None,
     "sweep_preview_points":       None,
+    # guard flags for preventing double-execution during Streamlit reruns
+    "_generating_sweep":          False,
+    "_adding_placements":         False,
 }
 
 for key, default in _STATE_DEFAULTS.items():
@@ -579,8 +582,13 @@ else:
 
     # ── Generate ──────────────────────────────────────────────────────────────
     if st.button("🎯 Generate sweep → add to batch queue", use_container_width=True):
+        if st.session_state._generating_sweep:
+            st.stop()
+        st.session_state._generating_sweep = True
+
         if st.session_state.current_direction is None:
             st.error("Run a placement in Section 3 first to register the surface normal direction.")
+            st.session_state._generating_sweep = False
             st.stop()
 
         _sw_centroid = hotspot_centroid(target, hotspot_ids)
@@ -675,6 +683,7 @@ else:
             f"({len(_sw_configs) - _sw_added} skipped). "
             f"Total in queue: **{len(st.session_state.batch_queue)}**."
         )
+        st.session_state._generating_sweep = False
 
         # Build placement point spheres (deduplicate by anchor+direction+distance, ignore spin)
         _anchor_color = {"cen": "#f4a261", "hs": "#ffd166", "sp": "#4ecdc4"}
@@ -827,6 +836,10 @@ st.caption(
 )
 
 if st.button("➕ Add current placements to batch queue", use_container_width=True):
+    if st.session_state._adding_placements:
+        st.stop()
+    st.session_state._adding_placements = True
+
     _multi = len(st.session_state.linked_structures) > 1
     _added = 0
     _skipped = 0
@@ -875,6 +888,7 @@ if st.button("➕ Add current placements to batch queue", use_container_width=Tr
     if _skipped > 0:
         _msg += f" ({_skipped} duplicate(s) skipped)"
     st.success(_msg)
+    st.session_state._adding_placements = False
 
 # Queue display
 if st.session_state.batch_queue:
