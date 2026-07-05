@@ -1338,5 +1338,9 @@
     "5_Binder_RMSD": {
         "threshold": 4.5,
         "higher": false
+    },
+    "Hotspot_Contacts": {
+        "threshold": 1,
+        "higher": true
     }
 }

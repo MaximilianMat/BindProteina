@@ -7,7 +7,7 @@ import torch
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
-from typing import Optional, Dict
+from typing import Optional, Dict, Set, Tuple
 
 from pipeline.scoring.pyrosetta_scorer import run_pyrosetta_scoring
 
@@ -18,6 +18,133 @@ def _pick_filter_spec(filters: Dict, metric_suffix: str, model_num: int):
         if isinstance(spec, dict) and spec.get("threshold") is not None:
             return key, spec
     return None, None
+
+
+def _parse_residue_id_string(spec: Optional[str]) -> Set[int]:
+    """
+    Parse a residue-id string like "50-107,150,200-205" into a set of ints.
+
+    Accepts both the hotspot format used by the designer and the
+    comma-separated ``target_interface_residues`` string produced by PyRosetta.
+    Non-numeric / malformed tokens are skipped.
+    """
+    ids: Set[int] = set()
+    if not spec:
+        return ids
+    for part in str(spec).replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part.lstrip("-"):
+            # range token (guard against a leading minus on a negative number)
+            lo, hi = part.split("-", 1) if not part.startswith("-") else (part, "")
+            try:
+                ids.update(range(int(lo), int(hi) + 1))
+            except (ValueError, TypeError):
+                continue
+        else:
+            try:
+                ids.add(int(part))
+            except (ValueError, TypeError):
+                continue
+    return ids
+
+
+def _chain_author_to_position(pdb_path: str, chain: str = "A") -> Dict[int, int]:
+    """
+    Map author residue numbers -> 1-based sequential position for one chain.
+
+    Positions follow the same convention the seed placer uses when it renumbers
+    the target (ascending order of the original residue ids), which is the
+    numbering the generated / refolded structures carry.  Insertion codes are
+    ignored; a residue is counted once per author number.
+    """
+    author_ids = []
+    seen = set()
+    try:
+        with open(pdb_path) as fh:
+            for line in fh:
+                if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                    continue
+                if len(line) < 26 or line[21] != chain:
+                    continue
+                try:
+                    res_seq = int(line[22:26])
+                except ValueError:
+                    continue
+                if res_seq not in seen:
+                    seen.add(res_seq)
+                    author_ids.append(res_seq)
+    except OSError:
+        return {}
+    return {rid: pos for pos, rid in enumerate(sorted(author_ids), 1)}
+
+
+def _resolve_hotspot_positions(
+    hotspot_spec: Optional[str],
+    reference_pdb: Optional[str],
+    reference_chain: str,
+) -> Set[int]:
+    """
+    Return the hotspot residues as 1-based sequential positions.
+
+    Without a reference PDB the spec is assumed to already be positional (this is
+    the case for the main pipeline, where the designer writes
+    ``target_hotspot_positions``).  With a reference PDB the spec is treated as
+    author numbering and mapped through that structure's chain.
+    """
+    ids = _parse_residue_id_string(hotspot_spec)
+    if not ids or not reference_pdb:
+        return ids
+    author_to_pos = _chain_author_to_position(reference_pdb, reference_chain)
+    if not author_to_pos:
+        print(f"WARNING: could not read chain {reference_chain} from {reference_pdb}; "
+              "treating hotspot residues as already positional.")
+        return ids
+    mapped = {author_to_pos[i] for i in ids if i in author_to_pos}
+    missing = sorted(ids - set(author_to_pos))
+    if missing:
+        print(f"WARNING: hotspot residues absent from chain {reference_chain} of "
+              f"reference PDB (ignored): {','.join(map(str, missing))}")
+    return mapped
+
+
+def _hotspot_contact_metrics(
+    interface_scores: Dict,
+    hotspot_ids: Set[int],
+    min_contacts: int,
+) -> Tuple[Dict, bool]:
+    """
+    Compare the target interface residues against the input hotspot residues.
+
+    Uses ``target_interface_residues`` (the chain-A residues within 8 A of the
+    binder, already computed by ``score_interface``) so no extra structure work
+    is needed.  Returns a metrics dict to merge into the design row and a
+    pass/fail boolean (True when at least ``min_contacts`` hotspots are touched).
+    """
+    contacted = _parse_residue_id_string(interface_scores.get("target_interface_residues", ""))
+    contacted_hotspots = sorted(hotspot_ids & contacted)
+    n_hotspots = len(hotspot_ids)
+    metrics = {
+        "n_hotspots": n_hotspots,
+        "hotspot_contacts": len(contacted_hotspots),
+        "hotspot_contact_fraction": (
+            round(len(contacted_hotspots) / n_hotspots, 3) if n_hotspots else None
+        ),
+        "hotspot_contact_residues": ",".join(map(str, contacted_hotspots)),
+    }
+    passed = len(contacted_hotspots) >= min_contacts
+    return metrics, passed
+
+
+def _resolve_min_hotspot_contacts(filters: Dict, model_num: int) -> int:
+    """Min hotspots the binder must contact to pass; from filters JSON, else 1."""
+    _, spec = _pick_filter_spec(filters, "Hotspot_Contacts", model_num)
+    if spec and spec.get("threshold") is not None:
+        try:
+            return max(1, int(spec["threshold"]))
+        except (ValueError, TypeError):
+            pass
+    return 1
 
 def score_complexes(
     input_dir: str,
@@ -33,6 +160,9 @@ def score_complexes(
     force_rosetta: bool = False,
     fetch_all_msas: bool = False,
     n_diffusion_samples: int = 5,
+    target_hotspot_residues: Optional[str] = None,
+    target_reference_pdb: Optional[str] = None,
+    target_chain: str = "A",
 ):
     """
     Universal 2-stage scoring orchestrator.
@@ -57,6 +187,18 @@ def score_complexes(
             internet access; the result is at <out_dir>/target/msa/hmmsearch.a3m.
             When provided, --use_template true is passed to protenix pred.
         fetch_all_msas: Whether to fetch MSAs for all chains.
+        target_hotspot_residues: Optional hotspot residue string (e.g. "50-107,150").
+            When provided, each scored design is checked for whether its binder
+            actually contacts the hotspots (via the 8 A interface residue set) and
+            a hotspot-contact filter is applied.  IMPORTANT: this is interpreted in
+            the refolded structure's numbering, i.e. 1-based sequential chain-A
+            positions (what the folding model emits), NOT the original author
+            numbering — unless ``target_reference_pdb`` is given.
+        target_reference_pdb: Optional PDB whose ``target_chain`` carries the
+            original author numbering.  When given, ``target_hotspot_residues`` is
+            treated as author numbering and mapped to 1-based positions through it,
+            so non-1-based / gapped targets are handled correctly.
+        target_chain: Chain id in ``target_reference_pdb`` to map through (default "A").
     """
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("medium")
@@ -74,6 +216,13 @@ def score_complexes(
         print(f"Using filters: {filters_path}")
     else:
         print("No filter file provided; folding filter stage will keep all designs.")
+
+    hotspot_ids = _resolve_hotspot_positions(
+        target_hotspot_residues, target_reference_pdb, target_chain
+    )
+    if hotspot_ids:
+        print(f"Hotspot-contact check enabled for {len(hotspot_ids)} residue position(s): "
+              f"{','.join(map(str, sorted(hotspot_ids)))}")
 
     pdbs = sorted(input_path.rglob("*.pdb"))
     if not pdbs:
@@ -148,18 +297,29 @@ def score_complexes(
     folding_csv = out_path / f"{folding_model}_prescoring_results.csv"
     skip_folding = False
     
-    if folding_csv.exists():
-        existing_df = pd.read_csv(folding_csv)
-        if len(existing_df) == len(pdbs) and (existing_df["status"] == "predicted").all():
-            print(f"Found complete pre-scoring CSV with {len(existing_df)} designs, skipping folding stage.")
-            folding_rows = existing_df.to_dict("records")
-            for row in folding_rows:
-                if row.get("status") == "predicted":
-                    design_name = row["design_name"]
-                    cands = list(predictions_dir.rglob(f"{design_name}_*.pdb"))
-                    if cands:
-                        folding_outputs.append((design_name, str(cands[0])))
-            skip_folding = True
+    if folding_csv.exists() and os.path.getsize(folding_csv) > 0:
+        try:
+            existing_df = pd.read_csv(folding_csv)
+            if len(existing_df) == len(pdbs) and (existing_df["status"] == "predicted").all():
+                print(f"Found complete pre-scoring CSV with {len(existing_df)} designs, skipping folding stage.")
+                folding_rows = existing_df.to_dict("records")
+                
+                # Pre-index to avoid O(N^2) NFS lookups
+                design_to_pdb = {}
+                for p in predictions_dir.rglob("*.pdb"):
+                    if p.name.endswith("_protenix.pdb"):
+                        design_to_pdb[p.name[:-13]] = str(p)
+                    elif "_model" in p.name:
+                        design_to_pdb[p.name.rsplit("_model", 1)[0]] = str(p)
+
+                for row in folding_rows:
+                    if row.get("status") == "predicted":
+                        design_name = row["design_name"]
+                        if design_name in design_to_pdb:
+                            folding_outputs.append((design_name, design_to_pdb[design_name]))
+                skip_folding = True
+        except Exception as e:
+            print(f"Warning: could not read pre-scoring CSV: {e}")
 
     if not skip_folding:
         if folding_model == "af2":
@@ -357,6 +517,8 @@ def score_complexes(
         "interface_delta_unsat_hbonds_percentage": "InterfaceUnsatHbondsPercentage"
     }
 
+    min_hotspot_contacts = _resolve_min_hotspot_contacts(filters, af2_model_num_for_filter)
+
     final_rows = []
     pyrosetta_passing = 0
     
@@ -407,10 +569,20 @@ def score_complexes(
                     pyrosetta_passed = False
                 else:
                     filter_results[f"pyrosetta_filter_{metric}"] = "PASS"
-            
+
+            # Hotspot-contact check: does the binder actually touch the hotspots?
+            if hotspot_ids:
+                hs_metrics, hs_passed = _hotspot_contact_metrics(
+                    interface_scores, hotspot_ids, min_hotspot_contacts
+                )
+                interface_scores.update(hs_metrics)
+                filter_results["pyrosetta_filter_hotspot_contacts"] = "PASS" if hs_passed else "FAIL"
+                if not hs_passed:
+                    pyrosetta_passed = False
+
             if pyrosetta_passed:
                 pyrosetta_passing += 1
-                
+
             final_rows.append(
                 {
                     "design_name": design_name,
@@ -455,6 +627,9 @@ def score_complexes(
             if col in final_df.columns:
                 n_fail = (final_df[col] == "FAIL").sum()
                 print(f"  {metric}: {(n_fail/total_pyrosetta)*100:.1f}%")
+        if hotspot_ids and "pyrosetta_filter_hotspot_contacts" in final_df.columns:
+            n_fail = (final_df["pyrosetta_filter_hotspot_contacts"] == "FAIL").sum()
+            print(f"  hotspot_contacts (min {min_hotspot_contacts}): {(n_fail/total_pyrosetta)*100:.1f}%")
         print("-----------------------------------\n")
 
     elapsed_pyrosetta = time.time() - start_time_pyrosetta
@@ -483,9 +658,15 @@ def score_from_protenix_json(
     seed: int = 42,
     force_rosetta: bool = False,
     fetch_all_msas: bool = False,
+    target_hotspot_residues: Optional[str] = None,
+    target_reference_pdb: Optional[str] = None,
+    target_chain: str = "A",
 ):
     """
     Full scoring pipeline starting from a Protenix-style input JSON.
+
+    See ``score_complexes`` for the semantics of ``target_hotspot_residues``,
+    ``target_reference_pdb`` and ``target_chain`` (hotspot-contact checking).
 
     No PDB files required — sequences are taken directly from the JSON.
     Convention: first chain in each entry = target; all remaining chains = binder.
@@ -518,6 +699,14 @@ def score_from_protenix_json(
         print(f"Using filters: {filters_path}")
     else:
         print("No filter file provided; folding filter stage will keep all designs.")
+
+    hotspot_ids = _resolve_hotspot_positions(
+        target_hotspot_residues, target_reference_pdb, target_chain
+    )
+    if hotspot_ids:
+        print(f"Hotspot-contact check enabled for {len(hotspot_ids)} residue position(s): "
+              f"{','.join(map(str, sorted(hotspot_ids)))}")
+    min_hotspot_contacts = _resolve_min_hotspot_contacts(filters, 1)
 
     # ── Resolve / generate target MSA ─────────────────────────────────
     from pipeline.scoring.folding_protenix import generate_target_msa_dir
@@ -570,19 +759,27 @@ def score_from_protenix_json(
     folding_outputs = []
     skip_folding = False
     
-    if folding_csv.exists():
-        existing_df = pd.read_csv(folding_csv)
-        if len(existing_df) == len(entries) and (existing_df["status"] == "predicted").all():
-            print(f"Found complete pre-scoring CSV with {len(existing_df)} complexes, skipping folding stage.")
-            folding_rows = existing_df.to_dict("records")
-            for row in folding_rows:
-                if row.get("status") == "predicted":
-                    design_name = row["design_name"]
-                    binder_chains = row.get("binder_chains", "B")
-                    cands = list(predictions_dir.rglob(f"{design_name}_protenix.pdb"))
-                    if cands:
-                        folding_outputs.append((design_name, str(cands[0]), binder_chains))
-            skip_folding = True
+    if folding_csv.exists() and os.path.getsize(folding_csv) > 0:
+        try:
+            existing_df = pd.read_csv(folding_csv)
+            if len(existing_df) == len(entries) and (existing_df["status"] == "predicted").all():
+                print(f"Found complete pre-scoring CSV with {len(existing_df)} complexes, skipping folding stage.")
+                folding_rows = existing_df.to_dict("records")
+                
+                # Pre-index to avoid O(N^2) NFS lookups
+                design_to_pdb = {}
+                for p in predictions_dir.rglob("*_protenix.pdb"):
+                    design_to_pdb[p.name[:-13]] = str(p)
+
+                for row in folding_rows:
+                    if row.get("status") == "predicted":
+                        design_name = row["design_name"]
+                        binder_chains = row.get("binder_chains", "B")
+                        if design_name in design_to_pdb:
+                            folding_outputs.append((design_name, design_to_pdb[design_name], binder_chains))
+                skip_folding = True
+        except Exception as e:
+            print(f"Warning: could not read pre-scoring CSV: {e}")
 
     if not skip_folding:
         print(f"Folding model: Protenix ({protenix_model_name}) — JSON Batch Mode")
@@ -744,6 +941,17 @@ def score_from_protenix_json(
                     pyrosetta_passed = False
                 else:
                     filter_results[f"pyrosetta_filter_{metric}"] = "PASS"
+
+            # Hotspot-contact check: does the binder actually touch the hotspots?
+            if hotspot_ids:
+                hs_metrics, hs_passed = _hotspot_contact_metrics(
+                    interface_scores, hotspot_ids, min_hotspot_contacts
+                )
+                interface_scores.update(hs_metrics)
+                filter_results["pyrosetta_filter_hotspot_contacts"] = "PASS" if hs_passed else "FAIL"
+                if not hs_passed:
+                    pyrosetta_passed = False
+
             if pyrosetta_passed:
                 pyrosetta_passing += 1
             final_rows.append({

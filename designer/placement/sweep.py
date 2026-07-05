@@ -177,17 +177,23 @@ def generate_sweep_configs(
     # ── Seed spins ─────────────────────────────────────────────────────────
     spins = np.linspace(0.0, 360.0, max(1, n_spins), endpoint=False).tolist()
 
+    def _format_distance(d: float) -> str:
+        if abs(d - round(d)) < 1e-3:
+            return f"{round(d)}"
+        return f"{d}".replace(".", "_")
+
     # ── Build configs ──────────────────────────────────────────────────────
     configs: List[Dict[str, Any]] = []
 
     for anchor_pos, anchor_label in cone_anchors:
         for direction, dir_label in cone_directions_list:
             for distance in distances:
+                _dist_str = f"_{_format_distance(distance)}A" if len(distances) > 1 else ""
                 for spin in spins:
                     for tilt in tilts:
                         configs.append({
                             "anchor_pos":   anchor_pos,
-                            "anchor_label": f"{anchor_label}_{dir_label}",
+                            "anchor_label": f"{anchor_label}_{dir_label}{_dist_str}",
                             "direction":    direction,
                             "distance":     float(distance),
                             "rotation_deg": float(spin),
@@ -198,11 +204,12 @@ def generate_sweep_configs(
 
     for anchor_pos, direction, anchor_label in sphere_anchors:
         for distance in distances:
+            _dist_str = f"_{_format_distance(distance)}A" if len(distances) > 1 else ""
             for spin in spins:
                 for tilt in tilts:
                     configs.append({
                         "anchor_pos":   anchor_pos,
-                        "anchor_label": anchor_label,
+                        "anchor_label": f"{anchor_label}{_dist_str}",
                         "direction":    direction,
                         "distance":     float(distance),
                         "rotation_deg": float(spin),

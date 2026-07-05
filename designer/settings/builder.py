@@ -21,7 +21,9 @@ def build_settings(
     # --- target ---
     target_chain: str = "A",
     target_length: Optional[int] = None,    # auto-derived if not given
-    hotspot_residues_str: str = "",         # e.g. "50-107"
+    hotspot_residues_str: str = "",         # e.g. "50-107" (author numbering, human-readable)
+    hotspot_positions_str: str = "",        # e.g. "1-58" (1-based sequential; matches the
+                                            # placer's target renumbering — used by the scorer)
     # --- linker / seed ---
     linker_length: int = 1,
     keep_linker_end_n: Optional[int] = None,  # defaults to linker_length
@@ -111,6 +113,12 @@ def build_settings(
         settings["target_length"] = target_length
     if hotspot_residues_str.strip():
         settings["target_hotspot_residues"] = hotspot_residues_str.strip()
+    # 1-based sequential hotspot positions (matches the placer's target
+    # renumbering) — this is what the scorer's hotspot-contact check consumes,
+    # since the generated/refolded structures are numbered 1..N, not by the
+    # original (possibly non-1-based) author numbering.
+    if hotspot_positions_str.strip():
+        settings["target_hotspot_positions"] = hotspot_positions_str.strip()
 
     return settings
 

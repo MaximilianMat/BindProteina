@@ -130,6 +130,24 @@ def _pdb_sequence(pdb_path: str, chain_id: str) -> str:
     return "".join(residues)
 
 
+def _hotspot_positions_str(hotspot_ids: list, sorted_chain_ids: list) -> str:
+    """
+    Convert author-numbered hotspot residue IDs to 1-based sequential positions.
+
+    The seed placer (placer.place_seed) renumbers the target chain to 1..N in
+    ascending order of the original residue IDs, so the generated / refolded
+    structures the scorer sees are 1-based-sequential — NOT the author numbering
+    the user typed.  This maps each hotspot to its position (rank) in the sorted
+    chain so the downstream hotspot-contact check compares like-for-like.
+
+    Residues not present in the chain are skipped (they were already dropped by
+    the Section-2 validation).
+    """
+    rank = {rid: i for i, rid in enumerate(sorted_chain_ids, 1)}
+    positions = sorted(rank[h] for h in hotspot_ids if h in rank)
+    return ",".join(str(p) for p in positions)
+
+
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
@@ -273,6 +291,14 @@ if hotspot_str.strip() and target is not None:
         hotspot_ids = []
 else:
     hotspot_ids = st.session_state.hotspot_ids
+
+# 1-based sequential positions (matches the placer's target renumbering) — this
+# is the numbering the generated/refolded structures use, so it is what the
+# scorer's hotspot-contact check must compare against.  See _hotspot_positions_str.
+hotspot_positions_str = (
+    _hotspot_positions_str(hotspot_ids, residue_ids_in_chain(target, chain_id))
+    if hotspot_ids and target is not None else ""
+)
 
 # Quick structure preview when target is loaded
 if target is not None and st.session_state.target_pdb_str:
@@ -636,7 +662,8 @@ else:
                     )
                     continue
 
-                _sw_suffix = f"_sw_{_cfg['anchor_label']}_s{_cfg['rotation_deg']:.0f}"
+                _tilt_str = f"_tilt{_cfg['tilt_deg']:.0f}" if (len(sw_tilts) > 1 or abs(_cfg['tilt_deg']) > 0.5) else ""
+                _sw_suffix = f"_sw_{_cfg['anchor_label']}_s{_cfg['rotation_deg']:.0f}{_tilt_str}"
                 _sw_label = _sw_binder_name + _sw_suffix
                 if _sw_label in _existing_labels:
                     _sw_skipped.append(
@@ -667,6 +694,7 @@ else:
                         "protenix_model":    st.session_state.s_protenix_model,
                         "target_msa":        st.session_state.s_target_msa,
                         "hotspot_str":       hotspot_str.strip(),
+                        "hotspot_positions_str": hotspot_positions_str,
                         "target_length":     st.session_state.target_length,
                     },
                 })
@@ -879,6 +907,7 @@ if st.button("➕ Add current placements to batch queue", use_container_width=Tr
                 "protenix_use_template":  st.session_state.s_protenix_use_template,
                 "original_pdb_local":     st.session_state.s_original_pdb_local,
                 "hotspot_str":            hotspot_str.strip(),
+                "hotspot_positions_str":  hotspot_positions_str,
                 "target_length":     st.session_state.target_length,
             },
         })
@@ -981,6 +1010,7 @@ if st.session_state.batch_queue:
                 output_dir_cluster=_item["base_output_dir"] + _item["suffix"],
                 target_length=_ss["target_length"],
                 hotspot_residues_str=_ss["hotspot_str"],
+                hotspot_positions_str=_ss.get("hotspot_positions_str", ""),
                 linker_length=_item["n_seed"],
                 keep_linker_end_n=_ss["keep_linker_end_n"],
                 n_samples=_ss["n_samples"],
@@ -1003,12 +1033,15 @@ if st.session_state.batch_queue:
             save_settings(_settings, _json_file)
             _cluster_json_paths.append(tr.to_cluster(_json_file))
 
+        # Deduplicate paths while preserving order
+        _unique_paths = list(dict.fromkeys(_cluster_json_paths))
+
         _manifest_local = str(_bsave / f"batch_manifest_{_ts()}.txt")
-        save_batch_manifest(_cluster_json_paths, _manifest_local)
+        save_batch_manifest(_unique_paths, _manifest_local)
         _manifest_cluster = tr.to_cluster(_manifest_local)
 
         st.success(
-            f"Saved {len(_cluster_json_paths)} configuration(s) + manifest to `{_bsave}`"
+            f"Saved {len(_unique_paths)} configuration(s) + manifest to `{_bsave}`"
         )
         st.subheader("SLURM commands")
         if _batch_protenix_mt_cmd:
@@ -1018,11 +1051,11 @@ if st.session_state.batch_queue:
         else:
             st.caption("Copy this to your cluster terminal:")
         st.code(
-            batch_slurm_command(_manifest_cluster, len(_cluster_json_paths), int(_max_concurrent)),
+            batch_slurm_command(_manifest_cluster, len(_unique_paths), int(_max_concurrent)),
             language="bash",
         )
         with st.expander("Manifest contents"):
-            st.code("\n".join(_cluster_json_paths), language="text")
+            st.code("\n".join(_unique_paths), language="text")
 
 # ---------------------------------------------------------------------------
 # ── Section 6: Output ──
@@ -1089,6 +1122,7 @@ if st.button("💾 Save files + show SLURM commands", use_container_width=True):
             output_dir_cluster=f"{output_dir_cluster}{suffix}",
             target_length=st.session_state.target_length,
             hotspot_residues_str=hotspot_str.strip(),
+            hotspot_positions_str=hotspot_positions_str,
             linker_length=n_seed_i,
             keep_linker_end_n=int(keep_linker_end_n),
             n_samples=int(n_samples),

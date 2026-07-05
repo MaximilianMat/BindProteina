@@ -267,6 +267,19 @@ def main():
     checkpoint = fix_path(lp_settings["checkpoint_path"])
     output_base_dir = settings.get("output_dir", "./initial_generation")
     hotspot_string = settings.get("target_hotspot_residues", "")
+    # The scorer compares hotspots against the refolded structure, which is
+    # numbered 1..N (the placer renumbers the target). Prefer the pre-computed
+    # 1-based positions written by the designer; fall back to the author string
+    # only when positions are absent (safe only for 1-based-contiguous targets).
+    hotspot_positions_string = settings.get("target_hotspot_positions", "")
+    if not hotspot_positions_string and hotspot_string:
+        logger.warning(
+            "Settings provide 'target_hotspot_residues' but not "
+            "'target_hotspot_positions'. Assuming the hotspot numbering already "
+            "matches the folded structure (1-based, no gaps). If the target PDB "
+            "is not 1-based/contiguous, regenerate the settings JSON with the "
+            "designer so hotspot positions are mapped correctly."
+        )
     
     # Linker length range: parse from string "5-30" format (like hotspot_residues)
     # Check both top-level and nested in laproteina_settings
@@ -632,6 +645,7 @@ def main():
                 msa_db_path=msa_db,
                 target_template=target_template,
                 n_diffusion_samples=protenix_n_diffusion_samples,
+                target_hotspot_residues=hotspot_positions_string or hotspot_string,
             )
         except Exception as e:
             logger.error(f"Modular scoring failed: {e}")

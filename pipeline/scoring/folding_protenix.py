@@ -651,6 +651,13 @@ def run_protenix_refolding_batch(
                 
             chunk_elapsed = time.time() - chunk_start_time
             logger.info(f"Chunk {i+1}/{n_chunks}: {len(chunk_payload)} designs in {chunk_elapsed:.1f}s")
+            
+            # Clean up the chunk directory to save disk space
+            import shutil
+            try:
+                shutil.rmtree(chunk_dir)
+            except Exception as e:
+                logger.warning(f"Could not delete chunk dir {chunk_dir}: {e}")
 
         except Exception as e:
             err = f"Protenix chunk {chunk_idx} exception: {e}"
@@ -887,6 +894,13 @@ def run_protenix_from_json_payload(
 
             chunk_elapsed = time.time() - chunk_start_time
             logger.info(f"Chunk {i+1}/{n_chunks}: {len(chunk_payload)} complexes in {chunk_elapsed:.1f}s")
+            
+            # Clean up the chunk directory to save disk space
+            import shutil
+            try:
+                shutil.rmtree(chunk_dir)
+            except Exception as e:
+                logger.warning(f"Could not delete chunk dir {chunk_dir}: {e}")
 
         except Exception as e:
             err = f"Protenix chunk {chunk_idx} exception: {e}"

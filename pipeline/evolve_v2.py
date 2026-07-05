@@ -510,6 +510,7 @@ def evolve_lineage_single_round(
             target_msa=target_msa,
             msa_db_path=msa_db_path,
             target_template=target_template,
+            target_hotspot_residues=target_hotspot_residues,
         )
     except Exception as e:
         logger.error(f"  Scoring failed: {e}")
@@ -792,7 +793,41 @@ def main():
         msa_db = fix_path(msa_db)
     if target_template:
         target_template = fix_path(target_template)
-    
+
+    # ── Normalise hotspot / blacklist numbering ────────────────────────────
+    # The scorer and the interface filter compare against the refolded structure,
+    # which is numbered 1..N. Convert the (possibly non-1-based) author numbering
+    # to 1-based sequential positions. Prefer the designer-provided mapping; else
+    # map author numbers through the target PDB's chain A.
+    from pipeline.scoring.scorer import _chain_author_to_position, _parse_residue_id_string
+
+    def _map_to_positions(spec, author_to_pos, label):
+        ids = _parse_residue_id_string(spec)
+        if not ids:
+            return spec
+        mapped = sorted(author_to_pos[i] for i in ids if i in author_to_pos)
+        missing = sorted(ids - set(author_to_pos))
+        if missing:
+            logger.warning(f"{label} residues not found in target chain A (ignored): {missing}")
+        return ",".join(map(str, mapped))
+
+    _hotspot_positions_setting = settings.get("target_hotspot_positions")
+    if _hotspot_positions_setting:
+        target_hotspot_residues = _hotspot_positions_setting
+        logger.info(f"Using designer-provided hotspot positions: {target_hotspot_residues}")
+    _author_to_pos = _chain_author_to_position(target_pdb, "A") if target_pdb else {}
+    if _author_to_pos:
+        if target_hotspot_residues and not _hotspot_positions_setting:
+            target_hotspot_residues = _map_to_positions(target_hotspot_residues, _author_to_pos, "Hotspot")
+            logger.info(f"Mapped hotspot residues to 1-based positions: {target_hotspot_residues}")
+        if target_blacklist_residues:
+            target_blacklist_residues = _map_to_positions(target_blacklist_residues, _author_to_pos, "Blacklist")
+    elif (target_hotspot_residues and not _hotspot_positions_setting) or target_blacklist_residues:
+        logger.warning(
+            "Could not read target chain A for residue mapping; assuming hotspot/"
+            "blacklist residues are already in 1-based sequential numbering."
+        )
+
     # Create output directory
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
     output_dir = Path(output_base_dir) / f"evolution_v2_{date_str}"

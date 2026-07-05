@@ -26,7 +26,7 @@ import argparse
 
 
 # ---------------------------------------------------------------------------
-# Regex-based token extractors
+# Regex-based token extractors & Sweep dimension helpers
 # ---------------------------------------------------------------------------
 
 # Fragment codes we recognise (order matters: longer codes first)
@@ -55,62 +55,37 @@ _ORIENTATION_CODES = {
     "reference": "reference",
 }
 
-# Distance pattern: handles integer (10A) and fractional (6_5A or 6-5A → 6.5)
-_DIST_RE = re.compile(r"_(\d+(?:[_-]\d+)?)A(?:_|$)")
-
-# Rotation and tilt
-_ROT_RE  = re.compile(r"_?rot(\d+)")
-_TILT_RE = re.compile(r"_?tilt(\d+)")
-
-# Hotspot residue
-_HS_RE = re.compile(r"_hs(\d+)")
-
-
-def _parse_distance(s: str) -> str | None:
-    """Return distance as a string like '10' or '6.5', or None."""
-    m = _DIST_RE.search(s)
-    if m:
-        raw = m.group(1)
-        return raw.replace("_", ".").replace("-", ".")  # 6_5 or 6-5 → 6.5
-    return None
+# Helper to check if a token is a dimension prefix/delimiter
+_SWEEP_INDICATOR_RE = re.compile(r"^sw$", re.IGNORECASE)
+_ANCHOR_RE = re.compile(r"^(cen|sp\d+|hs\d+)$", re.IGNORECASE)
+_CONE_AZ_RE = re.compile(r"^c\d+(?:az\d+)?$", re.IGNORECASE)
+_SPIN_RE_TOKEN = re.compile(r"^s\d+$", re.IGNORECASE)
+_ROT_RE_TOKEN = re.compile(r"^rot\d+$", re.IGNORECASE)
+_TILT_RE_TOKEN = re.compile(r"^tilt\d+$", re.IGNORECASE)
+_DIST_RE_TOKEN = re.compile(r"^\d+(?:[_-]\d+)?A$", re.IGNORECASE)
 
 
-def _parse_fragment(s: str) -> str | None:
-    for code, name in _FRAGMENT_CODES.items():
-        # Match as a whole token (delimited by underscores or start/end)
-        if re.search(rf"(?:^|_){re.escape(code)}(?:_|$)", s):
-            return name
-    return None
-
-
-def _parse_orientation(s: str) -> str | None:
-    for code, name in _ORIENTATION_CODES.items():
-        if re.search(rf"(?:^|_){re.escape(code)}(?:_|$)", s):
-            return name
-    return None
-
-
-def _parse_rot(s: str) -> str | None:
-    m = _ROT_RE.search(s)
-    return m.group(1) if m else None
-
-
-def _parse_tilt(s: str) -> str | None:
-    m = _TILT_RE.search(s)
-    return m.group(1) if m else None
-
-
-def _parse_hotspot(s: str) -> str | None:
-    m = _HS_RE.search(s)
-    return m.group(1) if m else None
-
-
-def _parse_target(s: str) -> str | None:
-    """First token before the first underscore-separated dimension."""
-    parts = s.split("_")
-    if parts:
-        return parts[0]
-    return None
+def _is_dimension_token(tok: str) -> bool:
+    tok_lower = tok.lower()
+    if _SWEEP_INDICATOR_RE.match(tok_lower):
+        return True
+    if _ANCHOR_RE.match(tok_lower):
+        return True
+    if _CONE_AZ_RE.match(tok_lower):
+        return True
+    if _SPIN_RE_TOKEN.match(tok_lower):
+        return True
+    if _ROT_RE_TOKEN.match(tok_lower):
+        return True
+    if _TILT_RE_TOKEN.match(tok_lower):
+        return True
+    if _DIST_RE_TOKEN.match(tok_lower):
+        return True
+    if tok_lower in _FRAGMENT_CODES:
+        return True
+    if tok_lower in _ORIENTATION_CODES:
+        return True
+    return False
 
 
 def parse_condition_from_path(path_str):
@@ -189,33 +164,73 @@ def parse_condition(name: str) -> dict:
     """
     cond: dict = {}
 
-    target = _parse_target(name)
+    # Separate target from the rest of the condition folder name to prevent false matches in target names
+    parts = name.split("_")
+    idx = len(parts)
+    for i, part in enumerate(parts):
+        if _is_dimension_token(part):
+            idx = i
+            break
+
+    if idx > 0:
+        target = "_".join(parts[:idx])
+    else:
+        target = parts[0] if parts else None
+
     if target:
         cond["target"] = target
 
-    hs = _parse_hotspot(name)
-    if hs is not None:
-        cond["hotspot"] = hs
+    dims_str = "_" + "_".join(parts[idx:]) if idx < len(parts) else ""
+    is_sweep = "sweep" in name or "_sw_" in name or re.search(r"\bsw\b", dims_str, re.IGNORECASE) is not None
 
-    frag = _parse_fragment(name)
-    if frag is not None:
-        cond["fragment"] = frag
+    # 1. Hotspot residue / index
+    m_hs = re.search(r"_hs(\d+)(?:_|$)", dims_str, re.IGNORECASE)
+    if m_hs:
+        if is_sweep:
+            # In sweep, hs0, hs1 etc are anchor indices
+            cond["anchor"] = f"hs{m_hs.group(1)}"
+        else:
+            cond["hotspot"] = m_hs.group(1)
 
-    orient = _parse_orientation(name)
-    if orient is not None:
-        cond["orientation"] = orient
+    # 2. Anchor (non-hs)
+    m_anchor = re.search(r"_(cen|sp\d+)(?:_|$)", dims_str, re.IGNORECASE)
+    if m_anchor:
+        cond["anchor"] = m_anchor.group(1).lower()
 
-    dist = _parse_distance(name)
-    if dist is not None:
-        cond["distance"] = dist
+    # 3. Fragment
+    for code, full_name in _FRAGMENT_CODES.items():
+        if re.search(rf"(?:^|_){re.escape(code)}(?:_|$)", dims_str, re.IGNORECASE):
+            cond["fragment"] = full_name
+            break
 
-    rot = _parse_rot(name)
-    if rot is not None:
-        cond["rotation"] = rot
+    # 4. Orientation
+    for code, full_name in _ORIENTATION_CODES.items():
+        if re.search(rf"(?:^|_){re.escape(code)}(?:_|$)", dims_str, re.IGNORECASE):
+            cond["orientation"] = full_name
+            break
 
-    tilt = _parse_tilt(name)
-    if tilt is not None:
-        cond["tilt"] = tilt
+    # 5. Distance
+    m_dist = re.search(r"_(\d+(?:[_-]\d+)?)A(?:_|$)", dims_str, re.IGNORECASE)
+    if m_dist:
+        raw = m_dist.group(1)
+        cond["distance"] = raw.replace("_", ".").replace("-", ".")
+
+    # 6. Rotation (spin)
+    m_rot = re.search(r"_(?:rot|s)(\d+)(?:_|$)", dims_str, re.IGNORECASE)
+    if m_rot:
+        cond["rotation"] = m_rot.group(1)
+
+    # 7. Tilt
+    m_tilt = re.search(r"_tilt(\d+)(?:_|$)", dims_str, re.IGNORECASE)
+    if m_tilt:
+        cond["tilt"] = m_tilt.group(1)
+
+    # 8. Cone Angle and Azimuth
+    m_cone = re.search(r"_c(\d+)(?:az(\d+))?(?:_|$)", dims_str, re.IGNORECASE)
+    if m_cone:
+        cond["cone_angle"] = m_cone.group(1)
+        if m_cone.group(2) is not None:
+            cond["azimuth"] = m_cone.group(2)
 
     return cond
 
@@ -301,8 +316,9 @@ def main():
 
         cond = parse_condition(condition_str)
 
-        # Must have at least fragment or distance to be useful
-        if "fragment" not in cond and "distance" not in cond:
+        # Must have at least fragment or distance to be useful, OR be a sweep run
+        is_sweep = "sweep" in condition_str or "_sw_" in condition_str or "anchor" in cond or "cone_angle" in cond
+        if not is_sweep and "fragment" not in cond and "distance" not in cond:
             continue
 
         n_success = _count_success(initial_dir)
