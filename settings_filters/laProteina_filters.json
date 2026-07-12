@@ -1342,5 +1342,13 @@
     "Hotspot_Contacts": {
         "threshold": 1,
         "higher": true
+    },
+    "ipSAE": {
+        "threshold": null,
+        "higher": true
+    },
+    "ipSAE_min": {
+        "threshold": null,
+        "higher": true
     }
 }

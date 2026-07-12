@@ -263,12 +263,115 @@ def _build_metrics_dict(
         "has_clash":       best_data.get("has_clash"),
         "disorder":        best_data.get("disorder"),
         "num_recycles":    best_data.get("num_recycles"),
-        "pAE":             None,   # not available from Protenix
+        "pAE":             None,   # scalar PAE not reported by Protenix summary
         "i_pAE":           None,
         "sequence":        binder_seq,
         "binder_length":   binder_len,
         "folding_model":   model_name,
     }
+
+
+# Module-level ipSAE cutoffs (reference defaults; see pipeline/scoring/ipsae.py).
+IPSAE_PAE_CUTOFF = 10.0
+IPSAE_DIST_CUTOFF = 10.0
+
+
+def _load_sample_pae(best_cif: Path):
+    """
+    Load the full token-level confidence (PAE matrix + token pLDDT) that Protenix
+    writes next to the chosen sample's CIF.
+
+    Protenix's ``pred`` output only exposes scalar summaries in
+    ``*_summary_confidence_sample_*.json``; the token PAE lives in a sibling
+    confidence file whose exact name/format varies by version.  We therefore search
+    the sample's directory for a non-``summary`` confidence/pae file matching the
+    design prefix + sample index and try the common containers (JSON keys
+    ``pae``/``predicted_aligned_error``; NPZ arrays of the same names).  Returns
+    ``(pae_matrix, plddt)`` or ``(None, None)`` if nothing usable is found — the
+    caller then leaves ipSAE blank rather than failing.
+    """
+    import re
+    import numpy as np
+
+    best_cif = Path(best_cif)
+    stem = best_cif.stem                      # {design}_sample_{N}
+    m = re.search(r"sample_(\d+)", stem)
+    sample_tag = f"sample_{m.group(1)}" if m else ""
+    prefix = stem.split("_sample_")[0] if "_sample_" in stem else stem
+
+    def _load(path: Path):
+        try:
+            if path.suffix == ".npz":
+                d = np.load(path)
+                for k in ("pae", "predicted_aligned_error", "pae_matrix"):
+                    if k in d:
+                        plddt = None
+                        for pk in ("plddt", "token_plddt", "atom_plddts"):
+                            if pk in d:
+                                plddt = np.asarray(d[pk]); break
+                        return np.asarray(d[k]), plddt
+            elif path.suffix == ".json":
+                with open(path) as fh:
+                    d = json.load(fh)
+                for k in ("pae", "predicted_aligned_error"):
+                    if k in d:
+                        plddt = d.get("plddt") or d.get("token_plddt") or d.get("atom_plddts")
+                        return np.asarray(d[k]), (np.asarray(plddt) if plddt is not None else None)
+        except Exception:
+            return None, None
+        return None, None
+
+    def _candidates(files):
+        out = []
+        for p in files:
+            if not p.is_file() or p.suffix not in (".json", ".npz"):
+                continue
+            name = p.name
+            if "summary_confidence" in name:
+                continue
+            if sample_tag and sample_tag not in name:
+                continue
+            if prefix and not name.startswith(prefix):
+                continue
+            if not any(t in name.lower() for t in ("confidence", "pae", "full_data")):
+                continue
+            out.append(p)
+        out.sort(key=lambda p: (p.suffix != ".json", len(p.name)))
+        return out
+
+    for search in (best_cif.parent.glob("*"), best_cif.parent.rglob("*")):
+        for c in _candidates(search):
+            pae, plddt = _load(c)
+            if pae is not None:
+                logger.info(f"ipSAE: loaded PAE from {c.name} (shape {getattr(pae, 'shape', None)})")
+                return pae, plddt
+    return None, None
+
+
+def _augment_metrics_with_ipsae(metrics: dict, best_cif, pdb_path: str) -> dict:
+    """
+    Compute the ipSAE bundle for one design and merge it into ``metrics`` (in place).
+
+    Requires the design's PDB on disk (chain A = target, ``binder_chains`` = binder)
+    and a loadable Protenix PAE matrix.  No-op if either is missing; never raises.
+    """
+    try:
+        if not best_cif or not pdb_path or not os.path.exists(pdb_path):
+            return metrics
+        pae, plddt = _load_sample_pae(Path(best_cif))
+        if pae is None:
+            return metrics
+        from pipeline.scoring.ipsae import compute_ipsae_bundle
+        binder_chains = metrics.get("binder_chains", "B") or "B"
+        bundle = compute_ipsae_bundle(
+            pae, str(pdb_path), plddt=plddt,
+            target_chains="A", binder_chains=binder_chains,
+            pae_cutoff=IPSAE_PAE_CUTOFF, dist_cutoff=IPSAE_DIST_CUTOFF,
+        )
+        metrics.update(bundle)
+    except Exception as e:
+        logger.warning(f"ipSAE computation failed for a design: {e}")
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +462,7 @@ def run_protenix_refolding(
         pass
 
     metrics = _build_metrics_dict(best_data, binder_seq, binder_len, model_name)
+    _augment_metrics_with_ipsae(metrics, best_cif, protenix_pdb_path)
     return protenix_pdb_path, metrics
 
 
@@ -418,6 +522,7 @@ def _get_completed_designs(work_dir, payload: list, job_info: dict, model_name: 
                         metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
                         if "binder_chains" in jinfo:
                             metrics["binder_chains"] = jinfo["binder_chains"]
+                        _augment_metrics_with_ipsae(metrics, best_cif, str(pdb_path))
                         with open(meta_path, "w") as f:
                             json.dump(metrics, f)
                         completed_results.append((dn, str(pdb_path), metrics))
@@ -641,7 +746,7 @@ def run_protenix_refolding_batch(
                     metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
                     if "binder_chains" in jinfo:
                         metrics["binder_chains"] = jinfo["binder_chains"]
-                        
+                    _augment_metrics_with_ipsae(metrics, best_cif, protenix_pdb_path)
                     with open(meta_path, "w") as f:
                         json.dump(metrics, f)
                         
@@ -886,6 +991,7 @@ def run_protenix_from_json_payload(
                         pass
                     metrics = _build_metrics_dict(best_data, jinfo["binder_seq"], jinfo["binder_len"], model_name)
                     metrics["binder_chains"] = jinfo["binder_chains"]
+                    _augment_metrics_with_ipsae(metrics, best_cif, protenix_pdb_path)
                     with open(meta_path, "w") as f:
                         json.dump(metrics, f)
                     results.append((design_name, protenix_pdb_path, metrics))

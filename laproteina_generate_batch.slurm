@@ -6,7 +6,7 @@
 #SBATCH --qos=default
 #SBATCH --gres=gpu:1
 #SBATCH --mem 40gb
-#SBATCH --time 3:00:00
+#SBATCH --time 48:00:00
 #SBATCH --output=laproteina_batch_%A_%a.log
 
 # Initialise environment and modules

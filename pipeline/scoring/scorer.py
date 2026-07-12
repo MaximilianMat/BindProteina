@@ -10,6 +10,7 @@ from tqdm import tqdm
 from typing import Optional, Dict, Set, Tuple
 
 from pipeline.scoring.pyrosetta_scorer import run_pyrosetta_scoring
+from pipeline.scoring.ipsae import BUNDLE_KEYS as IPSAE_BUNDLE_KEYS
 
 def _pick_filter_spec(filters: Dict, metric_suffix: str, model_num: int):
     candidates = [f"{model_num}_{metric_suffix}", f"1_{metric_suffix}", metric_suffix]
@@ -417,6 +418,8 @@ def score_complexes(
         "pAE": "pAE",
         "i_pAE": "i_pAE",
         "sc_rmsd": "Binder_RMSD",
+        "ipsae": "ipSAE",
+        "ipsae_min": "ipSAE_min",
     }
 
     af2_model_num_for_filter = af2_model_idx or 1
@@ -596,6 +599,7 @@ def score_complexes(
                     "i_pAE": folding_row.get("i_pAE"),
                     "sc_rmsd": folding_row.get("sc_rmsd"),
                     "binder_length": folding_row.get("binder_length"),
+                    **{k: folding_row.get(k) for k in IPSAE_BUNDLE_KEYS},
                     **interface_scores,
                     **filter_results,
                     "pyrosetta_filter_pass": pyrosetta_passed,
@@ -817,6 +821,7 @@ def score_from_protenix_json(
     metric_to_suffix = {
         "pLDDT": "pLDDT", "binder_pLDDT": "Binder_pLDDT",
         "pTM": "pTM", "i_pTM": "i_pTM", "pAE": "pAE", "i_pAE": "i_pAE",
+        "ipsae": "ipSAE", "ipsae_min": "ipSAE_min",
     }
     passing = []
     for row in folding_rows:
@@ -965,6 +970,7 @@ def score_from_protenix_json(
                 "i_pTM": folding_row.get("i_pTM"),
                 "ranking_score": folding_row.get("ranking_score"),
                 "binder_length": folding_row.get("binder_length"),
+                **{k: folding_row.get(k) for k in IPSAE_BUNDLE_KEYS},
                 **interface_scores,
                 **filter_results,
                 "pyrosetta_filter_pass": pyrosetta_passed,
