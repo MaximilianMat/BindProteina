@@ -303,19 +303,21 @@ def _load_sample_pae(best_cif: Path):
         try:
             if path.suffix == ".npz":
                 d = np.load(path)
-                for k in ("pae", "predicted_aligned_error", "pae_matrix"):
+                # "token_pair_pae" is Protenix's full-data key (see runner/dumper.py).
+                for k in ("pae", "predicted_aligned_error", "pae_matrix", "token_pair_pae"):
                     if k in d:
                         plddt = None
-                        for pk in ("plddt", "token_plddt", "atom_plddts"):
+                        for pk in ("plddt", "token_plddt", "atom_plddts", "atom_plddt"):
                             if pk in d:
                                 plddt = np.asarray(d[pk]); break
                         return np.asarray(d[k]), plddt
             elif path.suffix == ".json":
                 with open(path) as fh:
                     d = json.load(fh)
-                for k in ("pae", "predicted_aligned_error"):
+                for k in ("pae", "predicted_aligned_error", "token_pair_pae"):
                     if k in d:
-                        plddt = d.get("plddt") or d.get("token_plddt") or d.get("atom_plddts")
+                        plddt = (d.get("plddt") or d.get("token_plddt")
+                                 or d.get("atom_plddts") or d.get("atom_plddt"))
                         return np.asarray(d[k]), (np.asarray(plddt) if plddt is not None else None)
         except Exception:
             return None, None
@@ -436,6 +438,7 @@ def run_protenix_refolding(
         "--sample", str(n_diffusion_samples),
         "--use_msa", "true",       # precomputed MSA in JSON; suppress per-sample MSA search
         "--use_template", use_template_flag,
+        "--need_atom_confidence", "true",  # dump full token PAE for ipSAE
         "--enable_cache", "true",
     ]
     if target_template_path:
@@ -711,6 +714,7 @@ def run_protenix_refolding_batch(
             "--sample", str(n_diffusion_samples),
             "--use_msa", "true",
             "--use_template", "true" if resolved_template_path else "false",
+            "--need_atom_confidence", "true",  # dump full token PAE for ipSAE
             "--enable_cache", "true",
         ]
         if resolved_template_path:
@@ -958,6 +962,7 @@ def run_protenix_from_json_payload(
             "--sample", str(n_diffusion_samples),
             "--use_msa", "true",
             "--use_template", "true" if resolved_template_path else "false",
+            "--need_atom_confidence", "true",  # dump full token PAE for ipSAE
             "--enable_cache", "true",
         ]
         if resolved_template_path:

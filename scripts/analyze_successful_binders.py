@@ -60,6 +60,23 @@ def _gather_csv_files(root: Path) -> List[Path]:
     return sorted(files)
 
 
+def _is_truthy(val) -> bool:
+    """Interpret a CSV cell as a boolean pass/fail flag.
+
+    Handles native bools, the strings written by ``DataFrame.to_csv`` ("True"/
+    "False"), numeric flags, and PASS/FAIL strings. Missing/blank values are
+    treated as *not passing*.
+    """
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val != 0
+    s = str(val).strip().lower()
+    return s in {"true", "1", "1.0", "yes", "pass", "passed", "y", "t"}
+
+
 def _get_sample_name(row: pd.Series) -> Optional[str]:
     """Extract the per-sample name from a CSV row.
 
@@ -102,6 +119,7 @@ def analyze(
     top_n: int = 20,
     copy: bool = True,
     explicit_csv: Optional[Path] = None,
+    include_failed: bool = False,
 ) -> None:
     """Execute the full analysis pipeline."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -131,10 +149,17 @@ def analyze(
             print(f"[WARN] Skipping {csv_path}: {exc}")
             continue
         
-        # Try to detect successful samples column (optional)
+        # Detect the PyRosetta pass/fail column (per-design boolean).
+        pyrosetta_col = None
+        try:
+            pyrosetta_col = _detect_column(df, ["pyrosetta_filter_pass"])
+        except KeyError:
+            pass
+
+        # Try to detect an aggregate successful-samples count column (optional).
         successful_col = None
         try:
-            successful_col = _detect_column(df, ["successful", "num_successful", "relaxed", "num_relaxed", "pyrosetta_filter_pass"])
+            successful_col = _detect_column(df, ["num_successful", "num_relaxed"])
         except KeyError:
             pass
 
@@ -154,19 +179,29 @@ def analyze(
             csv_dir = csv_path.parent
             uid = f"{csv_dir.parent.name}/{csv_dir.name}/{sample_name}"
 
-            rec = {
+            # PyRosetta filter outcome. If the column is absent we cannot verify
+            # a design passed, so treat it as not-passing (excluded by default).
+            pyrosetta_pass = (
+                _is_truthy(row[pyrosetta_col]) if pyrosetta_col is not None else False
+            )
+
+            # Start from every column in the scoring CSV so all metrics are
+            # carried through, then layer on the derived / normalized fields.
+            rec = row.to_dict()
+            rec.update({
                 "uid": uid,
                 "sample_name": sample_name,
                 "iptm": iptm,
                 "plddt": plddt,
+                "pyrosetta_filter_pass": pyrosetta_pass,
                 "source_csv": str(csv_path),
                 "csv_dir": str(csv_dir),
-            }
-            
+            })
+
             # Add successful samples count if available
             if successful_col and pd.notna(row[successful_col]):
                 rec["successful_samples"] = int(row[successful_col])
-            
+
             records.append(rec)
 
     if not records:
@@ -186,18 +221,33 @@ def analyze(
         print(f"  25th   : {series.quantile(0.25):{fmt}}")
         print(f"  75th   : {series.quantile(0.75):{fmt}}")
 
+    n_pass = int(df_all["pyrosetta_filter_pass"].sum())
     print(f"\n=== Binder Success Summary ===")
-    print(f"Total samples : {len(df_all)}")
+    print(f"Total samples             : {len(df_all)}")
+    print(f"PyRosetta-passing samples : {n_pass}")
     _print_stats("ipTM", df_all["iptm"], ".3f")
     _print_stats("pLDDT", df_all["plddt"], ".2f")
-    
+
     # Print total successful samples count if available
     if "successful_samples" in df_all.columns:
         total_successful = df_all["successful_samples"].sum()
         print(f"Successful samples (PyRosetta): {int(total_successful)}")
 
+    # ----- Restrict top-N selection to PyRosetta-passing designs -----
+    if include_failed:
+        df_pass = df_all
+    else:
+        df_pass = df_all[df_all["pyrosetta_filter_pass"]].copy()
+        if df_pass.empty:
+            print(
+                "[ERROR] No PyRosetta-passing designs found (checked column "
+                "'pyrosetta_filter_pass'). If your CSVs do not record this "
+                "column, re-run with --include-failed to keep the old behaviour."
+            )
+            sys.exit(1)
+
     # ----- Top-N selection -----
-    df_sorted = df_all.sort_values(["iptm", "plddt"], ascending=False).reset_index(drop=True)
+    df_sorted = df_pass.sort_values(["iptm", "plddt"], ascending=False).reset_index(drop=True)
 
     copied = []  # list of dicts for top binder rows
     seen_uids: set[str] = set()
@@ -232,15 +282,12 @@ def analyze(
             print(f"[ERROR] Failed to {'copy' if copy else 'move'} {pdb_path}: {exc}")
             continue
 
-        copied.append({
-            "uid": uid,
-            "sample_name": row["sample_name"],
-            "iptm": row["iptm"],
-            "plddt": row["plddt"],
-            "source_csv": row["source_csv"],
-            "pdb_source": str(pdb_path),
-            "pdb_dest": str(dest),
-        })
+        # Carry through every scoring metric for this design, then append the
+        # resolved PDB source/destination paths.
+        rec = row.to_dict()
+        rec["pdb_source"] = str(pdb_path)
+        rec["pdb_dest"] = str(dest)
+        copied.append(rec)
 
     # ----- Write CSVs -----
     # Full stats
@@ -272,6 +319,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Number of top binders to collect.")
     parser.add_argument("--copy", action="store_true",
                         help="Copy PDB files instead of moving them.")
+    parser.add_argument("--include-failed", action="store_true",
+                        help="Include designs that did NOT pass the PyRosetta "
+                             "filters (default: only passing designs are collected).")
     return parser.parse_args()
 
 
@@ -283,4 +333,5 @@ if __name__ == "__main__":
         top_n=args.top_n,
         copy=args.copy,
         explicit_csv=args.csv,
+        include_failed=args.include_failed,
     )
