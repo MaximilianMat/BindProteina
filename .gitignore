@@ -47,3 +47,12 @@ laproteina/wandb/
 .vscode/
 .idea/
 *.code-workspace
+
+# Generated figures and analysis outputs (regenerate with scripts/)
+seed_placement_schematic.*
+analysis_*/
+*_results.json
+
+# Scratch and backups
+scratch/
+*_backup.json
