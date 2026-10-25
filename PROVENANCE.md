@@ -33,6 +33,11 @@ Upstream versions this repository was taken from and diffed against:
 Every "verbatim / modified / added" count below was produced by diffing this
 tree against those upstream commits, not by recollection.
 
+Declaring the modifications is also a license obligation, independent of how
+much they change: Apache-2.0 §4(b) requires that "any modified files carry
+prominent notices stating that You changed the files", and §4(c) that
+attribution notices be retained in derivative works.
+
 ---
 
 ## 1. What is my own claim
@@ -120,10 +125,10 @@ Counts are added/removed lines against commit `cde5de3`.
 | `proteinfoundation/nn/modules/pair_bias_attn.py` | +13/−5 | Accepts that bias as `extra_bias` and adds it to the pair bias. |
 | `proteinfoundation/nn/local_latents_transformer.py` | +10/−1 | Threads `residue_pdb_idx` and the bias flags through the indexed transformer. |
 | `proteinfoundation/nn/local_latents_transformer_unindexed.py` | +28/−1 | The same for the unindexed variant. |
-| `proteinfoundation/nn/feature_factory.py` | +16/−12 | Handles the `all_atom` / `tip_atom` motif modes used by the two checkpoints. |
-| `proteinfoundation/flow_matching/product_space_flow_matcher.py` | +22/−1 | Training-only: honours a `loss_mask` so loss can be restricted to non-motif residues. |
-| `proteinfoundation/datasets/pdb_data.py` | +42/−1 | Training-only: multimer-aware dataset columns and splits for the fine-tuning attempt. |
-| `proteinfoundation/datasets/transforms.py` | +17/0 | Transform plumbing for the above. |
+| `proteinfoundation/nn/feature_factory.py` | +16/−12 | Replaces upstream's comment-out-by-hand selection of the motif atom feature with a `MOTIF_ATOM_MODE` switch (`all_atom` for LD4, `tip_atom` for LD5). Selects between two upstream feature classes; adds no new feature. |
+| `proteinfoundation/flow_matching/product_space_flow_matcher.py` | +22/−1 | **Clamps the motif during sampling.** When `clamp_motif_during_sampling` is set, motif CA coordinates are reset to their anchor positions after every integration step. This is live on every reported run. Also honours a `loss_mask` (training only). |
+| `proteinfoundation/datasets/pdb_data.py` | +42/−1 | Robustness fixes in the training dataset loader: tolerate Graphein ligand-map parse failures, and recover PDB identifiers from `id` when a split dataframe has no `pdb` column. Training path only. |
+| `proteinfoundation/datasets/transforms.py` | +17/0 | Compatibility shim: maps `forward` → `__call__` for transforms, because newer `torch_geometric` makes `BaseTransform.forward` abstract. Environment fix, no behavioural change. |
 | `proteinfoundation/__init__.py` | +18/−3 | Package docstring describing the vendoring. |
 | `configs/generation/motif_dict.yaml` | +18/0 | Adds the `TARGET_BINDER_AA` / `TARGET_BINDER_TIP` motif tasks. |
 | `configs/generation/motif.yaml` | +2/−2 | Sample-count defaults. |
@@ -149,23 +154,55 @@ The runs use the released `LD4_motif_idx_aa.ckpt` and `LD5_motif_idx_tip.ckpt`
 checkpoints, with `AE3_motif.ckpt` as autoencoder, loaded explicitly by
 `pipeline/laproteina_generator.py` from the path in the target settings file.
 
-Two points of precision, since the thesis states that no direct changes were
-made to La-Proteina's inference code:
+The thesis states that no direct changes were made to La-Proteina's inference
+code. That is too strong, and the distinction worth drawing is between the
+*weights* and the *procedure*:
 
-1. **Some inference code *was* modified**, as the table in Sec. 2.1 shows. The
-   changes are I/O and conditioning plumbing — direct-binder dataset mode,
-   motif pinning, chain-aware output — not changes to the generative model or
-   its learned behaviour. No layer, loss or sampling rule of the released model
-   is altered on that path.
-2. **The relative-position attention bias is architectural, and it is off.** It
-   adds a learned embedding to attention, so enabling it with released weights
-   would mean untrained parameters. It is `False` in all five released-checkpoint
-   `configs/nn/` files, and the one config that sets it `True`
-   (`local_latents_score_nn_160M_motif_idx_aa_binder.yaml`) is referenced *only*
-   by the fine-tuning training config, never by the inference chain. The
-   inference configs declare no `nn:` default at all — the architecture comes
-   from the checkpoint's stored hyperparameters. So on the reported path the bias
-   is dormant.
+**What is unchanged.** No parameter of the released model is trained, replaced
+or re-initialised. No layer, loss function or network architecture is altered on
+the reported path. The learned function is exactly NVIDIA's.
+
+**What is changed, and is live on every reported run.** These are not cosmetic;
+they are the mechanism by which a monomer generator produces binders.
+
+1. **Direct binder mode** (`gen_dataset.py`). `direct_binder_mode: True` is set
+   in `configs/generation/motif_binder.yaml`, which the binder inference configs
+   pull in, so it is active for every reported run. It supplies
+   `residue_pdb_idx` with a 200-residue gap between target and binder
+   (`binder_chain_gap`), plus `chains` and `chain_breaks_per_residue`. Upstream
+   already *consumes* `residue_pdb_idx` — in the residue-index embedding, the
+   relative-sequence-separation pair feature and the backbone-angle adjacency
+   logic — and falls back to a contiguous `1..n` when it is absent. So this
+   change does not touch the network, but it changes the input features the
+   network sees: the target and binder are presented as sequence-distant rather
+   than covalently continuous. Without it the model would scaffold one
+   continuous chain, which is a different generative problem.
+2. **Motif clamping during sampling** (`product_space_flow_matcher.py`).
+   `direct_binder_mode` also sets `clamp_motif_during_sampling`, which resets
+   motif CA coordinates to their anchors after every integration step of the
+   sampler. This alters the sampling trajectory itself.
+3. **Motif pinning at output, and two-chain output**
+   (`proteina.py`, `pdb_utils.py`). Motif residue identities and atom
+   coordinates are held fixed in the decoded sample, and `chains` /
+   `residue_pdb_idx` / `atom_mask` are threaded out of the sampling loop so the
+   result can be written as a target chain plus a binder chain. Without this
+   there is nothing to score as a complex.
+
+**What is present but dormant.** The relative-position attention bias
+(`attn_n_transition.py`, `pair_bias_attn.py`, the two transformers) adds a
+learned embedding to attention, so enabling it with released weights would mean
+untrained parameters. It is `False` in all five released-checkpoint
+`configs/nn/` files; the one config that sets it `True`
+(`local_latents_score_nn_160M_motif_idx_aa_binder.yaml`) is referenced *only* by
+the fine-tuning training config, never by the inference chain; and the inference
+configs declare no `nn:` default at all, so the architecture comes from the
+checkpoint's stored hyperparameters. When disabled, `extra_bias` is `None` and
+the attention computation is bit-identical to upstream.
+
+A suggested wording for the thesis, which keeps the intended point and is
+defensible: *no model weights were trained, and no change was made to
+La-Proteina's architecture or learned function; the target is introduced through
+its existing motif-conditioning and residue-index interfaces.*
 
 One leftover is worth knowing: `configs/inference_motif_idx_aa_binder.yaml`
 still carries `run_name_: laproteina_ft_reference` and a `ckpt_path` pointing at
