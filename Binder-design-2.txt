@@ -1,819 +1,0 @@
-Running slides - progress
-Binder design
-Maximilian Matscher
-Last updated: 24/05
-1
-
-Open TODOs
-Evaluation of new linker creation + try large sample count for NPT2B, MUC1, CLD18 (DONE)
-Evaluation of a more broad evolution approach (DONE)
-Evaluation with PDL1 as benchmark that other papers use (Mostly DONE)
-Literature review
-Use known interactions to build binders (different generation approach) (TODO)
-Protpardelle vs LaProteina benchmark (try different underlying models) (In Progress)
-SeedFold (SeedProto) read their paper + analyse scoring approach 
-Last updated: 13/02
-2
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation of new linker creation approach
-3
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation of new linker creation approach
-MUC1:- initial generation run:AF2 metric summary:
-pLDDT: mean=0.352, min=0.214, max=0.780
-pTM:   mean=0.605, min=0.531, max=0.770
-i_pTM: mean=0.193, min=0.072, max=0.712      (NOTE: Re-evaluating with AF3 the sample with max ipTM results 0.91 ipTM)
-
-AF2 filter thresholds
-pLDDT >= 0.8
-pTM >= 0.55
-i_pTM >= 0.5
-i_pAE <= 0.35
-
-AF2 filter results: 0/128 passed
-i_pAE: 127 failures
-i_pTM: 113 failures
-pLDDT: 128 failures
-pTM: 10 failures
-4
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation of new linker creation approach
-CLD18:- initial generation run:AF2 Metric summary:
-AF2 metric summary:
-  pLDDT: mean = 0.447    min  = 0.329    max  = 0.583
-  pTM: mean = 0.593    min  = 0.556    max  = 0.624
-  i_pTM: mean = 0.193    min  = 0.121    max  = 0.372
-
-
-AF2 filter thresholds:
-pLDDT >= 0.8  
-pTM   >= 0.55  
-i_pTM >= 0.5  
-i_pAE <= 0.35
-
-AF2 filter results:
-  Passed: 0 / 56
-
-  Failures:
-    i_pAE: 56  i_pTM: 56  pLDDT: 56
-5
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation of new linker creation approach
-PDL1:- initial generation run:AF2 Metric summary:
-pLDDT: mean=0.365,  min=0.207, max=0.792pTM:   mean=0.544,  min=0.472, max=0.690i_pTM: mean=0.141,  min=0.059, max=0.692        (Also here re-evaluating the max sample with AF3 results in ipTM of 0.82)
-AF2 filter thresholds
-pLDDT >= 0.8
-pTM >= 0.55
-i_pTM >= 0.5
-i_pAE <= 0.35
-
-AF2 filter results: 0/256 passed
-i_pAE: 256 failures
-i_pTM: 254 failures
-pLDDT: 256 failures
-pTM: 143 failures
-6
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Iterative algorithm observations - PDL1
-Lineage 0110:Generated sample improved from ipTM 0.13 -> 0.39 -> 0.74
-
-7
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Iterative algorithm observations - PDL1
-Lineage 0110: Comparison with known good binder
-
-L0110 - Round 2
-00008znl (known good)
-8
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Iterative algorithm observations - General
-2 Rounds of interative redesign improve ipTM top samples by ~0.10 across all targets (also with improved plDDT values)in general no binders passed all filters
-PDL1 failures:Failures of top Samples due to ipAE( Min ipAE > 0.35, best samples ~0.39)MUC1 failures:Failures of top Samples due to surface hydrophobicity or plDDTNPT2B failures:Failures of top Samples due to plDDT
-9
-Maximilian Matscher - Master’s Thesis - Binder design
-
-MUC1 top sample
-Failure due to surface hydrophobicity = 0.5 > 0.35AF2:plDDT = 0.82; ipTM = 0.81AF3:iPTM= 0.92
-10
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Npt2b top sample
-Failure due to plDDT = 0.72 < 0.8
-11
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 top sample
-Failure due to ipAE and surface hydrophobicity
-12
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Research and Ideas
-13
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Portpardelle-1c
-“The binder design problem can be treated as a special case of the motif scaffolding problem, in which the target structure is the motif and the binder is the piece to generate. To handle multiple chains, we use learned relative positional embeddings added to the attention matrix analogous to AlphaFold2 [19], with a residue index gap between chains of 200. We train on a 50/50 mix of the single-chain augmented CATH dataset described previously and a curated chain pair dataset following Boltz-1 [20] (Appendix A).”A similar approach might be possible for LaProteina?Necessary changes:
-different (additional) training set to adapt LaProteina to multimers
-some structural changes needed, but possible
-Next task? 2 possible approaches:
-Explicitly add cross-chain pair features
-Add a 200 res gap and learn that a large gap means different sequence (AF2 way)
-14
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Portpardelle-1c
-“It is unclear whether the Protpardelle-1c samples are indeed difficult to pass in silico filters due to AF2 preference for helical structures” ~portpardelle-1c p.11Interesting: In the paper they try to benchmark Portpardelle against BindCraft and get worse results for 8 targets (measured in AF2 plDDt and ipTM). They argue that this might not necessarily result in worse in-vitro reproducibility, as BindCraft is optimized for AF2 scores => this could be similar for LaProteinaAlso they notice a preference in helicity for BindCraft, where Portpardelle seems to favour sheets for some samples. This might explain the worse AF2 scores (AF2 prefers Helical structures). So there might be plausible samples (that use sheets) that could have good in-vitro test results.
-15
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Portpardelle-1c
-16
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Thoughts
-When we use LaProteina for binder design, we are hoping that single-chain motif scaffolding generalizes to inter-chain interface generation. Protpardelle 1C's model has explicitly trained on chain pairs and knows what real interfaces look like. => re-training or fine tuning LaProteina could improve Binder Performance
-17
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation
-Linker based generation
-18
-Maximilian Matscher - Master’s Thesis - Binder design
-
-MUC1 Evaluation
-AF2 Filter:1_Binder_pLDDT (binder_pLDDT) >= 0.7 1_pTM (pTM) >= 0.55 1_i_pTM (i_pTM) >= 0.5 1_i_pAE (i_pAE) <= 0.35AF2 filter results: 48/2048 passed1_Binder_pLDDT: 1796 failures1_i_pAE: 1996 failures 1_i_pTM: 1935 failures1_pTM: 879 failures 
-
-
-PyRosetta filter:(400 fast relax iterations)9/48 pass
-
-
-Generated 2048 samples using 32 different linkers of varying length.We apply the AF2 filter FIRST and then we apply PyRosetta fastRelax on the passing samples.
-19
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 Evaluation
-AF2 Filter:1_Binder_pLDDT (binder_pLDDT) >= 0.7 1_pTM (pTM) >= 0.55 1_i_pTM (i_pTM) >= 0.5 1_i_pAE (i_pAE) <= 0.35AF2 filter results: 0/960 passed1_Binder_pLDDT: 1796 failures1_i_pAE: 1996 failures 1_i_pTM: 1935 failures1_pTM: 879 failures 
-
-
-PyRosetta filter:(400 fast relax iterations)/NOTE: CLD18 generation failed for some linker lengths so only 960/2048 samples were generated successfully
-
-
-Generated 2048 samples using 32 different linkers of varying length.We apply the AF2 filter FIRST and then we apply PyRosetta fastRelax on the passing samples.
-20
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 Evaluation
-AF2 Filter:1_Binder_pLDDT (binder_pLDDT) >= 0.7 1_pTM (pTM) >= 0.55 1_i_pTM (i_pTM) >= 0.5 1_i_pAE (i_pAE) <= 0.35AF2 filter results: 1/2048 passed1_Binder_pLDDT: 1984 failures1_i_pAE: 2047 failures 1_i_pTM: 2017 failures1_pTM: 702 failures 
-
-
-PyRosetta filter:(400 fast relax iterations)0/1Failed: 1_Surface_Hydrophobicity;1_n_InterfaceUnsatHbonds;Average_Interface_Hydrophobicity
-
-
-Generated 2048 samples using 32 different linkers of varying length.We apply the AF2 filter FIRST and then we apply PyRosetta fastRelax on the passing samples.
-21
-Maximilian Matscher - Master’s Thesis - Binder design
-
-NPT2B Evaluation
-AF2 Filter:1_Binder_pLDDT (binder_pLDDT) >= 0.7 1_pTM (pTM) >= 0.55 1_i_pTM (i_pTM) >= 0.5 1_i_pAE (i_pAE) <= 0.35AF2 filter results: 0/2048 passed1_Binder_pLDDT: 2048 failures1_i_pAE: 2048 failures 1_i_pTM: 2041 failures
-
-
-PyRosetta filter:(400 fast relax iterations)/
-
-
-Generated 2048 samples using 32 different linkers of varying length.We apply the AF2 filter FIRST and then we apply PyRosetta fastRelax on the passing samples.
-22
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 generation:
-Linker-based generation:(We create 32 linkers from different starting points, then generate samples of varying length starting from the linkers, then we score with AF2 and for the passing binders we score with PyRosetta)
-1- 2k samples (samples_pdl1/initial_20260220_1712)
-2- 4k samples (samples_pdl1/initial_20260226_0137)
-3- 10k samples (samples_pdl1/initial_20260226_0155)
-Results:1- 0 pass
-2- 0 pass
-3- 0 pass
-23
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 evolution:
-Evolution on the before generated samples(Each seed will be improved by LaProteina, by regenerating parts of the binder with low plDDt, per seed we generate 6 samples each and score, we loop this for 6 rounds)1- 2k samples (samples_pdl1/initial_20260220_1712) -> evolution_v2_20260226_0129
-2- 4k samples (samples_pdl1/initial_20260226_0137) -> evolution_v2_20260226_1713
-3- 10k samples (samples_pdl1/initial_20260226_0155) -> evolution_v2_20260227_0342
-(Preliminary) Results:
-1- 1 pass
-2- 3 pass
-3- 3 pass
-24
-Maximilian Matscher - Master’s Thesis - Binder design
-
-25
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Sample target: PDL1
-Length: 220 res
-26
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Sample target: PDL1
-Hotspot region: res 50-107 (for the approach there can be multiple regions, one used for simplicity here)
-27
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Linker creation approach:
-Create N linkers from N starting points throughout the hotspot region
-Linker length range between 5-30 (random), always multiples of GGGGS
-
-1 linker (left)vs.12 linkers (right)
-28
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-The “End” of the linker is always the starting point for generation.Lets looks at some samples for this linker (not in real order):
-29
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 1: 
-
-length: 32 res
-
-Notes:
-Seems to be quite far from the target
-30
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 2: 
-
-length: 34 res
-31
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 3,4,5: 
-32
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 6:
-
-Note:this time there is more structure 
-33
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 7:
- 
-34
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 9:
-
-Note:
-This one is a lot closer,this one seems to ‘stick’ to the target
-35
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 10:
-
-36
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Linker based monomeric binder generation
-Generation:
-Sample 11-15:Sadly most of them are just not near the target
-
-37
-Maximilian Matscher - Master’s Thesis - Binder design
-
-38
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Idea:Introduce a 200 res gap and use the motif scaffolding task to create a ‘binder’.
-39
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Overview:
-target + 13 binder
-40
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Sample 1:
-Notes:Binder in the right position near the hotspot, could be closer, but this is what we are looking for :)Also this looks similar to a known binder.
-41
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Sample 2:
-Notes: different part of the target (not necessarily a hotspot), structure is not as coherent
-42
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Sample 3:
-Notes: same as sample 2
-43
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Sample 4:
-Notes: structure is coherent, but far from target
-44
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Sample 5:
-Notes: again closer to hotspot region, looks more like a known binder
-45
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (no linker)
-Sample 6:
-Notes: Again similar to sample 1
-46
-Maximilian Matscher - Master’s Thesis - Binder design
-
-47
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (finetuned model)
-Finetuned on all-atom checkpoint LD4
-500 epochs of multimeric data
-PDB
-
-48
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (finetuned model)
-Sample 1:Note: Structure looks good, structure seems good in itself, but far from target and not adapted to target
-49
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Direct binder generation (finetuned model)
-Samples:
-Note:We can see that the samples are not formed near the target and are clustered, probably a finetuning artifact
-50
-Maximilian Matscher - Master’s Thesis - Binder design
-
-51
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Case study: PDL1 generation with known binder
-Known binder: 8ZNLAF3 scores:ipTM = 0.92, pTM = 0.83Title: “picomolar binding affinity”, but no measurement listed
-
-52
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Starting points:
-Starting point 1:Single helix of known binder30 res linker24 res helix
-Starting point 2:Half helix of known binder30 res linker9 res helix
-Starting point 3:Linker + no binder30 res linker
-53
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation
-AF2 success rates:1: 8,96%2: 1,60%3: 1,02%
-Thresholds:ipAE: <0.35ipTM: >0.5pLDDT: >0.7
-54
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation details
-
-55
-Maximilian Matscher - Master’s Thesis - Binder design
-
-ipTM distribution over binder length
-Starting point 1:binder length = 30-80 + single helix
-56
-Maximilian Matscher - Master’s Thesis - Binder design
-
-ipTM distribution over binder length
-Starting point 2:binder length = 30-80 + half helix
-57
-Maximilian Matscher - Master’s Thesis - Binder design
-
-ipTM distribution over binder length
-Starting point 3:binder length = 30-80 + no helix
-58
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Discussion
-The starting point is a strong bias, the model can use to generate valid binders
-What about novelty?
-Best binder range between 50-70 res, although there is no super strict boundary where rates decrease/increase, with a high likelihood the longer binders will contain garbage parts though
-59
-Maximilian Matscher - Master’s Thesis - Binder design
-
-60
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Starting points (floating residues):
-Starting point 1:Single helix of known binderno linker21 res helix
-Starting point 2:Half helix of known binderno linker10 res helix
-Starting point 3:Linker + no binderno linker4 res floating starting point
-Dotted lines = positional gap, residue numbering is consecutive (..., 121,122, positional gap, 123, 124,...)
-61
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation (floating residues)
-AF2 success rates:1: 20%2: 3,82%3: 3,12%
-Thresholds:ipAE: <0.35ipTM: >0.5pLDDT: >0.7
-62
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Evaluation details (floating residues)
-
-
-63
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Discussion: floating residues
-Hypothesis: keeping the linker actually reduces model quality as it gives a negative bias (i.e. residues that laProteina gets as input in the attention window, but is unused)
-64
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Protenix
-65
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Protenix notes:
-
-v2 is not open weights :(
-needs msa data to be accurate
-Speed difference compared to AF2 (for a target with length 200):
-AF2: ca. 1s per fold
-Protenix: ca. 13-15s per fold
-Protenix folds in random orientation, AF2 is stable
-No visual difference between the folds
-66
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Protenix test runs (protenix_base_default_v1.0.0)
-La Proteina (with AF3 prefolded input)
-Protenix using the sequence of LaProteina’s output
-67
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Protenix with additional msa data 
-Self consistent RMSD: 2.879 Overlapping view:
-68
-Maximilian Matscher - Master’s Thesis - Binder design
-
-AF2 
-AF2 Re-folding: 100%|██████████| 10000/10000 [2:58:44<00:00,  1.07s/it]
-Saved af2 pre-scoring to /nfs/students/matscher/samples/samples_pdl1/initial_20260419_2216/af2_prescoring_results.c
-sv
-
---- Folding Filter Statistics ---
-Total designs: 10000
-Passing designs: 925 (9,2%)
-Failing rates per filter:
-  pLDDT: 0.0%
-  binder_pLDDT: 49.5%
-  pTM: 0.0%
-  i_pTM: 49.6%
-  i_pAE: 88.9%
-  sc_rmsd: 49.8%
----------------------------------
-
-69
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Protenix 
-Protenix Batch Prediction: 100%|██████████| 10000/10000 [42:36:18<00:00, 15.34s/design]
-[04/29/26 03:04:21] INFO     Protenix batch complete:    folding_protenix.py:618
-                            10000/10000 designs                               
-                            succeeded in 153378.1s                            
-Saved protenix pre-scoring to /nfs/students/matscher/samples/samples_pdl1_linked_cut/initial_20260426_1512/protenix_prescoring_results.csv
-
---- Folding Filter Statistics ---
-Total designs: 10000
-Passing designs: 7201 (72.0%)
-Failing rates per filter:
- pLDDT: 0.0%
- binder_pLDDT: 0.0%
- pTM: 0.0%
- i_pTM: 1.8%
- i_pAE: 0.0%
- sc_rmsd: 27.7%
----------------------------------
-70
-Maximilian Matscher - Master’s Thesis - Binder design
-
-ProteinaComplexa
-71
-Maximilian Matscher - Master’s Thesis - Binder design
-
-ProteinaComplexa
-Validation approach:2 possibilities:
-let ProteinaComplexa Generate 10k samples then validate
-use ProteinaComplexas binder generation pipeline and compare top samples
-72
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 complexa vs. laProteina - success rates
-Evaluation for easy target PDL1 (10k samples each):AF2 validation + PyRosettaLaProteina-baseline: - success rate: 9,0%- ipTM: mean: 0,83, max: 0,906ProteinaComplexa:- success rate: 2,1%- ipTM: mean: 0,69, max: 0,868
-73
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 complexa vs. laProteina - uniqueness
-Foldseek analysis:
-10k samples each
-foldseek easy-cluster /nfs/students/matscher/samples/pld1_complexa_score clusterB tmp     --alignment-type 1     -c 0.9     --cov-mode 1
-Params:- alignment type = TMalign- coverage = 0.9
-
-
-74
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 complexa vs. laProteina - secondary structure analysis
-Secondary structure analysis using mdtraj
-Overall 10k samples eachSuccessfull samples:laProteina: 924complexa: 279
-75
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 complexa vs. laProteina - success rates
-
-Evaluation for hard target CLD18:AF2 validation + PyRosettaLaProteina-baseline (10k samples): - success rate: 7,07%  (1143 passing refolding, 707 PyRosetta )- ipTM: mean: 0,70 , max: 0,844ProteinaComplexa (10k samples):- success rate: 0,14% (24 passing re-folding, 14 PyRosetta)- ipTM: mean: 0,21, max: 0,805
-Failing rates per filter:binder_pLDDT: 92.5%
- pTM: 0.0%
- i_pTM: 98.1%
- i_pAE: 99.5%
- sc_rmsd: 98.2%
-
-Failing rates per filter:
- binder_pLDDT: 81.8%
- pTM: 0.0%
- i_pTM: 77.7%
- i_pAE: 87.8%
- sc_rmsd: 76.3%
-
-76
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 complexa vs. laProteina - uniqueness
-Foldseek analysis:
-10k samples each
-foldseek easy-cluster /nfs/students/matscher/samples/pld1_complexa_score clusterB tmp     --alignment-type 1     -c 0.9     --cov-mode 1
-Params:- alignment type = TMalign- coverage = 0.9
-
-
-77
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 complexa vs. laProteina - secondary structure analysis
-Secondary structure analysis using mdtraj
-
-
-78
-Maximilian Matscher - Master’s Thesis - Binder design
-
-79
-
-Proteina Complexa vs. laProteina - binder comparison
-Experiment:Proteina Complexa:Generate samples using best-of-n generation mode (default). Input was target PDB, hotspot residues (created using Pesto), and full length of the target protein. Binder length was set to 45-110 res)LaProteina:Generate samples using single seed point with 3 res. (Seed point based on a PXDesign binder).  Also here using the same target PDB and binder lengths. (Hotspot residues are not used in generation)
-80
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 complexa vs. laProteina - success rates
-Evaluation for easy target PDL1 (10k samples each):Protenix validation (protenix_base_20250630_v1.0.0) + PyRosettaLaProteina-baseline: - success rate: 67,65% (7398 passing folding validation, ~6765 of them passing PyRosetta) - ipTM: mean: 0,87, max: 0,96ProteinaComplexa (10k samples):- success rate: 19,95% (2445 passing folding validation, 1995 of them passing PyRosetta - ipTM: mean: 0,78, max: 0,95
-81
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 complexa vs. laProteina - cluster analysis
-These results were created using foldseek structure analysis. (--tmscore-threshold 0.5 --alignment-type 1)Note:Here we can see, that with less successful samples ProteinaComplexa is able to hit more clusters and creates more singletons
-82
-Maximilian Matscher - Master’s Thesis - Binder design
-
-PDL1 complexa vs. laProteina - secondary strcuture analysis
-These results were created using MDTraj (md.compute_dssp(..., simplified=True) which labels each residue with H/E/C, we then compute the fraction and plot itNote:Here we notice, that laProteina’s samples are strongly biased towards helical output
-83
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 complexa vs. laProteina - success rates
-
-Evaluation for hard target CLD18:Protenix validation (protenix_base_20250630_v1.0.0) + PyRosettaLaProteina-baseline (10k samples): - success rate: 20,99%  (3429 passing refolding, 2099 PyRosetta )- ipTM: mean: 0,72 , max: 0,89ProteinaComplexa (38k samples):- success rate: 0,23% (104 passing re-folding, 90 PyRosetta)- ipTM: mean: 0,66 max: 0,86
-84
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 complexa vs. laProteina - cluster analysis
-These results were created using foldseek structure analysis. (--tmscore-threshold 0.5 --alignment-type 1)
-85
-Maximilian Matscher - Master’s Thesis - Binder design
-
-CLD18 complexa vs. laProteina - secondary strcuture analysis
-These results were created using MDTraj (md.compute_dssp(..., simplified=True) which labels each residue with H/E/C, we then compute the fraction and plot itNote:Here we notice, that laProteina’s samples are strongly biased towards helical output
-86
-Maximilian Matscher - Master’s Thesis - Binder design
-
-NPT2B complexa vs. laProteina - success rates
-
-Evaluation for hard target NPT2B:Protenix validation (protenix_base_20250630_v1.0.0) + PyRosettaLaProteina-baseline (5284 samples): - success rate: 1,93%  (111 passing refolding, 102 PyRosetta )- ipTM: mean: 0, , max: 0,ProteinaComplexa (10k samples):- success rate: 1,02% (119 passing re-folding, 102 PyRosetta)- ipTM: mean: 0,767 max: 0,874
-87
-Maximilian Matscher - Master’s Thesis - Binder design
-
-NPT2B complexa vs. laProteina - cluster analysis
-These results were created using foldseek structure analysis. (--tmscore-threshold 0.5 --alignment-type 1)
-88
-Maximilian Matscher - Master’s Thesis - Binder design
-
-NPT2B complexa vs. laProteina - secondary strcuture analysis
-These results were created using MDTraj (md.compute_dssp(..., simplified=True) which labels each residue with H/E/C, we then compute the fraction and plot itNote:Contrary to the other targets, we can see a more even distribution
-89
-Maximilian Matscher - Master’s Thesis - Binder design
-
-90
-
-Ablation study: seed point configuration
-Key questions:how sensitive (in terms of positioning) is seed placement for binder generation?
-what parameters for seed placement influence binder generation and to what degree?
-Experiment parameters:- Targets: PDL1, CLD18, NPT2B- 100 sample binders per datapoint of the power set of all seed generation variables - Variables are: seed fragment (Single glycine, 3 res alpha helix, 5 res alpha helix, 3 res beta sheet), direction from hotspot residue (surface normal outward/inward), distance in direction (8Å,10Å,12Å,14Å), rotation angle of the fragment (0°,72°,144°,216°,288°)- LaProteina using all-atom motif scaffolding (LD4 checkpoint)- Folding validation using protenix (protenix_base_20250630_v1.0.0 checkpoint)- Binders generated in uniformly distributed length from 40-80
-91
-Maximilian Matscher - Master’s Thesis - Binder design
-TODO: experiment schematic
-
-Ablation study: outcomes PDL1
-92
-Maximilian Matscher - Master’s Thesis - Binder design
-- success rate given in 1/100 percent.- Hotspot residue used for PDL1: 58Notes:Seems like the surface normal inward placement starts the binder on “the wrong side” of the targets binding area. This is also visible when inspecting the samples
-
-Ablation study: outcomes PDL1
-93
-Maximilian Matscher - Master’s Thesis - Binder design
-Effect sizes per parameter
-
-Ablation study: outcomes PDL1
-94
-Maximilian Matscher - Master’s Thesis - Binder design
-General cluster size distribution
-Clusters created using foldseek with - alignment-type = 1, => emphasizes on structural alignment and not just sequence alignment- tmscore-threshold = 0.5 => should find cluster allowing a broad topology (we want to see if the different seed points result in entirely different binders, not just nuanced different)
-NOTES:A lot of (very) small clusters
-
-Ablation study: outcomes PDL1
-95
-Maximilian Matscher - Master’s Thesis - Binder design
-Number of unique clusters hit by the 100 samples per seed
-
-Ablation study: outcomes PDL1
-96
-Maximilian Matscher - Master’s Thesis - Binder design
-Singleton fraction per seed:shows how many samples per seed were singletons (the only sample of a cluster)
-
-Ablation study: outcomes PDL1 (successful samples)
-97
-Maximilian Matscher - Master’s Thesis - Binder design
-General cluster size distribution on successful samples
-
-Ablation study: outcomes PDL1 (successful samples)
-98
-Maximilian Matscher - Master’s Thesis - Binder design
-How many unique clusters were hit out of the  successful samples
-
-Ablation study: outcomes PDL1 (successful samples)
-99
-Maximilian Matscher - Master’s Thesis - Binder design
-Singleton fraction per seed:shows how many samples per seed were singletons (the only sample of a cluster)
-
-Ablation study: outcomes PDL1 (successful samples)
-100
-Maximilian Matscher - Master’s Thesis - Binder design
-Secondary structure analysis by fragment type
-
-Ablation study: outcomes PDL1 (successful samples)
-101
-Maximilian Matscher - Master’s Thesis - Binder design
-Secondary structure analysisn = 450
-
-102
-
-Ablation study: outcomes CLD18
-103
-Maximilian Matscher - Master’s Thesis - Binder design
-- success rate given in 1/100 percent.- Hotspot residue used for PDL1: 64- Failure reason: self_consistency_rmsdNotes:looking at the samples, seems like the hotspot residue resulted “in the middle” of the binding area, with that be binder is not able to be created in that area and moves “outward” => retry with a hotspot residue more outside => res 60
-
-Ablation study: outcomes CLD18
-104
-Maximilian Matscher - Master’s Thesis - Binder design
-- Hotspot residue used for PDL1: 60- Failure reason: self_consistency_rmsdNotes:-result are not really better-after visual inspection it seems like the binders are valid, but self consistency makes most binders fail (binder self consistency threshold is set at 4.5Å)(The only successful sample would fail the pyRosetta filter, as it does not interface a hotspot residue)
-
-Ablation study: outcomes CLD18
-105
-Maximilian Matscher - Master’s Thesis - Binder design
-Manual inspection of a random sample reveals quite valid looking binders:CLD18_hs60_3hx_sno_12A_rot216, samples 23-26:
-Here correct positioning is given,hotspot residues are interfacing,still all binders fail due to self-consistencyDiscussion: One reason for high self-consistency-rmsd could be a differing folding model for the target
-
-Ablation study: deviation CLD18
-106
-Maximilian Matscher - Master’s Thesis - Binder design
-Using different starting positions we try to some valid starting point (trying to be similar to an existing known good starting point, but with lightly adapted parameters)Good samples so far:- run reference CLD18_hs146_3hx_negy_7A_rot206_tilt20
-pLDDT
-binder_pLDDT
-pTM
-i_pTM
-pAE
-i_pAE
-sc_rmsd
-72.4869384765625
-68.9152181148529
-0.6837172508239746
-0.5253456830978394
--
--
-3.238
-
-Ablation study: deviation CLD18
-107
-Maximilian Matscher - Master’s Thesis - Binder design
-Using different starting positions we try to some valid starting point (trying to be similar to an existing known good starting point, but with lightly adapted parameters)Good samples so far:- run reference CLD18_hs146_3hxc_negy_7_5A_rot51_tilt40- sample_0010NOTE: sample is closer to the reference
-pLDDT
-binder_pLDDT
-pTM
-i_pTM
-pAE
-i_pAE
-sc_rmsd
-75.55024719238281
-76.86645984649658
-0.724692165851593
-0.7349135875701904
--
--
-4.421
-
-Ablation study: deviation CLD18
-108
-Maximilian Matscher - Master’s Thesis - Binder design
-Finding: having a not-well predictable part of the target, makes sc_rmsd calculation inflate the resulting rmsd. Using a modified target pdb file we can get more accurate results. The part that was removed is the intracellular (and non-binding) part of the target
-
-Average self-consistency over all generated samples:Average sc_rmsd using the reference pdb:31.631 ÅAverage sc_rmsd using the modified pdb:23.382 Å
-CLD18_hs42_3hxc_z_7A_rot206/linked_sample_000
-CLD18_hs146_3hxc_negy_7_5A_rot51_tilt40/linked_sample_010
-
-
-Ablation study: deviation CLD18
-109
-Maximilian Matscher - Master’s Thesis - Binder design
-CLD18 using modified pdb file
-
-Single ablation run using residue 42 of cld18 as reference residue. The starting fragment used was a 3 res alpha helix. With translation 7A in direction z(Different translation configurations were not explored in this test-run) 
-
-Ablation study: deviation CLD18
-110
-Maximilian Matscher - Master’s Thesis - Binder design
-n=31 successful samplesNOTE:we see a heavy tendency towards high helicity, so this does not seem to be influenced by the modified pdb
-
-111
-
-Ablation study: outcomes NPT2B
-112
-Maximilian Matscher - Master’s Thesis - Binder design
-- success rate given in 1/100 percent.- Hotspot residue used for NPT2B: 317
-
-Ablation study: outcomes NPT2B
-113
-Maximilian Matscher - Master’s Thesis - Binder design
-
-Ablation study: outcomes NPT2B
-114
-Maximilian Matscher - Master’s Thesis - Binder design
-n=22 successful samplesNOTE:
-diversity does not seem to be an issue here
-
-115
-
-Ablation study: supply CATH codes to LaProteina
-116
-Maximilian Matscher - Master’s Thesis - Binder design
-- Feature is commented in code with “Not supported”- Test to see if feature is just broken or not implemented- Same settings as for ablation CLD18 tests, but supplying CATH codes to LaProteinaResult: no difference between CATH settings, so feature is not trained in the public checkpoints
-Secondary-structure properties of generated samples split by different CATH settings
-Secondary-structure properties of successful samples colored by different CATH settings
-
-117
-
-Ablation study: “small” configuration changes
-118
-Maximilian Matscher - Master’s Thesis - Binder design
-- Idea: check if smaller changes in tilt and distance result in different hit-rates- Same settings as for ablation CLD18 tests (Slide 104), with res 42 as reference and different positioning parametersNOTE: it appears, that distance has a relatively small impact, small changes in tilt (~5-10°) seem to have more impact
