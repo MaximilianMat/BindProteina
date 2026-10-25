@@ -75,6 +75,8 @@ class GenDataset(Dataset):
                 Defaults to 1.
         """
         super(GenDataset, self).__init__()
+        # Keep motif_dict_cfg for fallback length sampling when empirical distribution is missing
+        self.motif_dict_cfg = motif_dict_cfg
         ##################################################################################
         ################### 1. Parse length and cath codes ###############################
         ##################################################################################
@@ -105,6 +107,9 @@ class GenDataset(Dataset):
                 "binder_target_nres", binder_target_nres
             )
             nsamples = [nsamples]
+            # Keep motif config for later motif info generation (after lists are
+            # initialized) so they are not accidentally overwritten.
+            self._motif_cfg = motif_cfg
         else:
             raise ValueError("Error in GenDataset init.")
 
@@ -122,28 +127,76 @@ class GenDataset(Dataset):
         self.x_motifs = [None] * len(nsamples)
         self.motif_out_strs = [None] * len(nsamples)
         self.masks = [None] * len(nsamples)
+        # If we stored a motif config earlier, generate motif info now after
+        # the lists above have been created so we don't overwrite generated
+        # motif tensors later on.
+        if hasattr(self, "_motif_cfg"):
+            try:
+                total_nsamples = nsamples[0] if isinstance(nsamples, list) and len(nsamples) == 1 else (
+                    sum(nsamples) if isinstance(nsamples, list) else nsamples
+                )
+                self.motif_masks, self.x_motifs, self.residue_types, self.motif_out_strs = (
+                    self.generate_motif_info(self._motif_cfg, total_nsamples, motif_csv_path)
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate motif info post-init: {e}")
+                raise
         if nres is not None:
             # Length-centric generation
             self.nres, self.cath_codes, self.nsamples = (
                 self.generate_cath_code_given_len(nres, nsamples)
             )
         elif cath_codes:
-            # Fold-centric generation
-            self.nres, self.cath_codes, self.nsamples = (
-                self.generate_len_given_cath_code(cath_codes, nsamples)
-            )
+            if motif_task_name:
+                # Motif tensors already generated; just attach CATH codes per sample
+                # in the grouped structure flatten_motif expects: [N codes] per group.
+                cath_codes_list = list(cath_codes)
+                N = len(self.motif_masks)
+                self.nsamples = nsamples  # [N] — one group of N samples
+                self.cath_codes = [[cath_codes_list[i % len(cath_codes_list)] for i in range(N)]]
+                # nres is not set here — flatten_motif derives it from padded tensor shapes.
+            else:
+                # Fold-centric generation (no motif): sample lengths from CATH distribution
+                self.nres, self.cath_codes, self.nsamples = (
+                    self.generate_len_given_cath_code(cath_codes, nsamples)
+                )
         else:
             self.nsamples = nsamples
-            self.cath_codes = [None] * len(nsamples)
             self.motif_masks, self.x_motifs, self.residue_types, self.motif_out_strs = (
                 self.generate_motif_info(motif_cfg, nsamples[0], motif_csv_path)
             )
+            if cath_codes is not None:
+                self.cath_codes = [cath_codes] * len(self.motif_masks)
+            elif empirical_distribution_cfg and empirical_distribution_cfg.get("len_cath_code_path") is not None:
+                self.cath_codes = []
+                for i in range(len(self.motif_masks)):
+                    length = self.motif_masks[i].shape[0]
+                    if self.cath_codes_given_len_bucket is not None:
+                        if length <= self.bucket_max_len:
+                            bucket_idx = (
+                                length - self.bucket_min_len
+                            ) // self.bucket_step_size
+                        else:
+                            bucket_idx = -1
+                        sampled_codes = random.choices(
+                            self.cath_codes_given_len_bucket[bucket_idx], k=1
+                        )[0]
+                        self.cath_codes.append(sampled_codes)
+                    else:
+                        self.cath_codes.append(None)
+            else:
+                self.cath_codes = [None] * len(self.motif_masks)
 
         ##################################################################################
         # 4. Make sure the nsamples for each data point is not greater than max_nsamples #
         ##################################################################################
         if max_nsamples_per_batch:
-            if nres is not None or cath_codes:
+            # If motif-conditioned sampling is used we must preserve motif tensors
+            # (masks, motif_masks, x_motifs). In that case use flatten_motif even
+            # when cath_codes is provided. Otherwise use flatten which only
+            # returns nres/cath_codes/nsamples.
+            use_flatten_motif = getattr(self, "motif_task_name", None) is not None
+            if (nres is not None) or (cath_codes and not use_flatten_motif):
                 self.nres, self.cath_codes, self.nsamples = self.flatten(
                     max_nsamples_per_batch
                 )
@@ -231,9 +284,44 @@ class GenDataset(Dataset):
 
     def generate_len_given_cath_code(self, cath_codes: List[str], nsamples: List[int]):
         """Pre-generate corresponding lengths for each cath code, then gather proteins of the same length as one batch"""
-        assert (
-            self.len_bucket_given_cath_codes is not None
-        ), "Need len_cath_code distribution for fold-centric generation"
+        # If an empirical len->cath_code distribution was not provided, fall back
+        # to sampling lengths uniformly from motif config bounds (if available)
+        if self.len_bucket_given_cath_codes is None:
+            logger.warning(
+                "No empirical (length, cath_code) distribution available; "
+                "falling back to uniform length sampling for requested CATH codes."
+            )
+            # Try to get sensible bounds from motif_dict_cfg
+            min_len = 30
+            max_len = 80
+            try:
+                if self.motif_dict_cfg and "BINDER_GENERATION" in self.motif_dict_cfg:
+                    m = self.motif_dict_cfg["BINDER_GENERATION"]
+                    min_len = int(m.get("motif_min_length", min_len))
+                    max_len = int(m.get("motif_max_length", max_len))
+            except Exception:
+                pass
+            tmp_nres = []
+            tmp_cath_codes = []
+            for i in range(len(cath_codes)):
+                for _ in range(nsamples[i]):
+                    # Sample an integer length in [min_len, max_len]
+                    _len = random.randint(min_len, max_len)
+                    tmp_nres.append(_len)
+                    tmp_cath_codes.append([cath_codes[i]])
+
+            # Gather the same lengths, as we need to generate proteins of the same length together
+            len_bucket = defaultdict(list)
+            out_nres, out_cath_codes, out_nsamples = [], [], []
+            for n, code in zip(tmp_nres, tmp_cath_codes):
+                len_bucket[n].append(code)
+
+            for n, code in len_bucket.items():
+                out_nres.append(n)
+                out_cath_codes.append(code)
+                out_nsamples.append(len(code))
+
+            return out_nres, out_cath_codes, out_nsamples
         tmp_nres = []
         tmp_cath_codes = []
         for i in range(len(cath_codes)):

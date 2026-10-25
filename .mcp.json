@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "google-docs": {
+      "command": "npx",
+      "args": ["-y", "@a-bonus/google-docs-mcp"],
+      "env": {
+        "GOOGLE_CLIENT_ID": "261493858003-mubqfll1tkce49f515hjns3josoh9910.apps.googleusercontent.com",
+        "GOOGLE_CLIENT_SECRET": "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"
+      }
+    }
+  }
+}

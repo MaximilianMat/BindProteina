@@ -99,9 +99,31 @@ def _rows_to_founders(df, scored_dir: Path, pass_col: str, seen: set,
     return out
 
 
+def baseline_roots(run_dir: str) -> List[Path]:
+    """Split ``baseline_run_dir`` into one or more existing roots.
+
+    A comma-separated value pools several prior runs into one founder set and RQ1
+    baseline - e.g. an initial seed search plus its follow-up expansion, which live in
+    sibling directories and so cannot both be reached by a single ``rglob``.
+    """
+    parts = [p.strip() for p in str(run_dir).split(",") if p.strip()]
+    if not parts:
+        raise ValueError("baseline_run_dir is empty")
+    roots = []
+    for p in parts:
+        root = Path(p)
+        if not root.exists():
+            raise FileNotFoundError(f"baseline_run_dir not found: {root}")
+        roots.append(root)
+    return roots
+
+
 def load_success_set(run_dir: str, filter_stage: str = "auto",
                      min_needed: Optional[int] = None) -> List[FounderRecord]:
-    """Collect founders from a prior blind run directory.
+    """Collect founders from one or more prior blind run directories.
+
+    ``run_dir`` is a single path or a comma-separated list of paths; matches across all
+    of them are pooled and de-duplicated by design name.
 
     ``filter_stage``:
       - "pyrosetta": only PyRosetta-passing founders (scoring_summary.csv).
@@ -111,49 +133,51 @@ def load_success_set(run_dir: str, filter_stage: str = "auto",
                      folding prefilter).
     Founders are returned PyRosetta-first.
     """
-    root = Path(run_dir)
-    if not root.exists():
-        raise FileNotFoundError(f"baseline_run_dir not found: {root}")
+    roots = baseline_roots(run_dir)
+    where = ", ".join(str(r) for r in roots)
 
     seen: set = set()
     pyros: List[FounderRecord] = []
     if filter_stage in ("auto", "pyrosetta"):
-        for csv in sorted(root.rglob("scoring_summary.csv")):
-            try:
-                df = pd.read_csv(csv)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Could not read {csv}: {e}")
-                continue
-            if "pyrosetta_filter_pass" not in df.columns:
-                continue
-            pyros += _rows_to_founders(df, csv.parent, "pyrosetta_filter_pass",
-                                       seen, stage="pyrosetta")
-        logger.info(f"Found {len(pyros)} PyRosetta-passing founders in {root}")
+        for root in roots:
+            for csv in sorted(root.rglob("scoring_summary.csv")):
+                try:
+                    df = pd.read_csv(csv)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Could not read {csv}: {e}")
+                    continue
+                if "pyrosetta_filter_pass" not in df.columns:
+                    continue
+                pyros += _rows_to_founders(df, csv.parent, "pyrosetta_filter_pass",
+                                           seen, stage="pyrosetta")
+        logger.info(f"Found {len(pyros)} PyRosetta-passing founders in {where}")
 
     need_folding = filter_stage == "folding" or (
         filter_stage == "auto" and min_needed is not None and len(pyros) < min_needed)
 
     folding: List[FounderRecord] = []
     if need_folding:
-        for csv in sorted(root.rglob("protenix_prescoring_results.csv")):
-            try:
-                df = pd.read_csv(csv)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Could not read {csv}: {e}")
-                continue
-            if "folding_filter_pass" not in df.columns:
-                continue
-            folding += _rows_to_founders(df, csv.parent, "folding_filter_pass",
-                                         seen, stage="folding")
-        logger.info(f"Found {len(folding)} folding-passing founders in {root} "
+        for root in roots:
+            for csv in sorted(root.rglob("protenix_prescoring_results.csv")):
+                try:
+                    df = pd.read_csv(csv)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Could not read {csv}: {e}")
+                    continue
+                if "folding_filter_pass" not in df.columns:
+                    continue
+                folding += _rows_to_founders(df, csv.parent, "folding_filter_pass",
+                                             seen, stage="folding")
+        logger.info(f"Found {len(folding)} folding-passing founders in {where} "
                     f"(supplementing {len(pyros)} PyRosetta founders)")
 
     founders = pyros + folding
     if not founders:
         raise RuntimeError(
-            f"No founders resolvable in {root} (filter_stage={filter_stage}). "
+            f"No founders resolvable in {where} (filter_stage={filter_stage}). "
             f"Try filter_stage='folding' or run pipeline.reseed.prepare_founders.")
-    logger.info(f"Loaded {len(founders)} founders from {root} (stage={filter_stage})")
+    logger.info(f"Loaded {len(founders)} founders from {len(roots)} root(s): {where} "
+                f"(stage={filter_stage})")
     return founders
 
 
@@ -227,13 +251,15 @@ def baseline_cumulative(run_dir: str) -> "pd.DataFrame":
     DataFrame with columns ``[sample_index, passed, cumulative_successes]`` — the
     reference curve the re-seeding cumulative-successes-vs-compute plot is drawn against.
     """
-    root = Path(run_dir)
+    roots = baseline_roots(run_dir)
     rows = []
-    summaries = sorted(root.rglob("scoring_summary.csv"))
+    summaries = [c for root in roots for c in sorted(root.rglob("scoring_summary.csv"))]
     if summaries:
         csvs, col = summaries, "pyrosetta_filter_pass"
     else:  # folding-only prior run
-        csvs, col = sorted(root.rglob("protenix_prescoring_results.csv")), "folding_filter_pass"
+        csvs = [c for root in roots
+                for c in sorted(root.rglob("protenix_prescoring_results.csv"))]
+        col = "folding_filter_pass"
     for csv in csvs:
         try:
             df = pd.read_csv(csv)

@@ -2,11 +2,11 @@
 #SBATCH --nodes 1
 #SBATCH --ntasks 1
 #SBATCH --cpus-per-task 1
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_a100,gpu_l40s,gpu_v100
 #SBATCH --qos=default
 #SBATCH --gres=gpu:1
 #SBATCH --mem 40gb
-#SBATCH --time 48:00:00
+#SBATCH --time 3:00:00
 #SBATCH --output=laproteina_batch_%A_%a.log
 
 # Initialise environment and modules

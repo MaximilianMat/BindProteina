@@ -13,6 +13,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, List
 
+from loguru import logger
+
 
 # Canonical seed-cut fragmentation patterns (spec §5.2). Each pattern partitions the
 # 5 seed residues into fragments swept from maximally dispersed (P1) to contiguous (P5).
@@ -100,6 +102,18 @@ class ReseedConfig:
     ss_bias_target: bool = False       # §11-j: flag as a strong-SS-bias target for RQ2
     beta_heavy_cutoff: float = 0.30    # §11-j: binder-relative sheet fraction to call "beta-heavy"
 
+    # Strain sharding: split the S strains across independent jobs / GPUs.
+    # Every shard selects the SAME global set of n_strains founders (selection is
+    # deterministic) and then keeps only those whose GLOBAL strain id satisfies
+    # sid % n_shards == shard_index, so strain ids never collide across shards and
+    # their outputs merge by union. Each shard MUST get its own output_base_dir.
+    #
+    # Strains are independent under redistribute_budget=false, so sharding is exact.
+    # It is NOT exact with redistribute_budget=true: redistribution is computed over
+    # the strains one job can see, so a sharded run redistributes within a shard only.
+    n_shards: int = 1
+    shard_index: int = 0
+
     # Reproducibility
     master_seed: int = 0
 
@@ -164,6 +178,32 @@ def load_config(settings_path: str, overrides: Optional[dict] = None) -> ReseedC
     if cfg.seed_selection not in ("random", "interface"):
         raise ValueError(
             f"seed_selection must be 'random' or 'interface', got {cfg.seed_selection!r}")
+    # CUT_PATTERNS is a fixed partition of 5 residues, and make_seed_cuts rejects any
+    # pattern whose lengths do not sum to seed_n_res. In "random" mode that rejection
+    # happens per strain, deep in the round loop, where the driver logs "cannot cut
+    # parent" and skips -- so every strain is skipped and the whole run goes extinct
+    # while looking like a legitimate biological result. Fail loudly at load instead.
+    # "interface" mode draws min(seed_n_res, n_interface_residues) and is unconstrained.
+    if cfg.seed_selection == "random":
+        bad = {cid: lens for cid, lens in CUT_PATTERNS.items()
+               if sum(lens) != cfg.seed_n_res}
+        if bad:
+            raise ValueError(
+                f"seed_n_res={cfg.seed_n_res} is incompatible with seed_selection="
+                f"'random': CUT_PATTERNS {bad} do not sum to it. Every strain would be "
+                f"skipped and the run would go extinct in round 1. Either keep "
+                f"seed_n_res=5, or use seed_selection='interface', which honours any "
+                f"seed_n_res up to the number of interface residues available.")
     if cfg.champion_ss_grid < 1:
         raise ValueError(f"champion_ss_grid must be >= 1, got {cfg.champion_ss_grid}")
+    if cfg.n_shards < 1:
+        raise ValueError(f"n_shards must be >= 1, got {cfg.n_shards}")
+    if not 0 <= cfg.shard_index < cfg.n_shards:
+        raise ValueError(
+            f"shard_index must be in [0, {cfg.n_shards}), got {cfg.shard_index}")
+    if cfg.n_shards > 1 and cfg.redistribute_budget:
+        logger.warning(
+            "redistribute_budget=true with n_shards>1: each shard only sees its own "
+            "strains, so freed budget is redistributed WITHIN a shard, not globally. "
+            "Set redistribute_budget=false for an exactly-sharded run.")
     return cfg

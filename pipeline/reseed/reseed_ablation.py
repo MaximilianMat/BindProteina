@@ -171,9 +171,26 @@ class ReseedRun:
             raise RuntimeError(f"No founders found in {self.cfg.baseline_run_dir}")
         chosen = founders_mod.select_strain_founders(all_founders, S=self.cfg.n_strains)
 
+        # Strain sharding. Founder selection above is deterministic, so every shard
+        # derives the identical global ordering and then keeps a disjoint slice of it.
+        # Strain ids stay GLOBAL (not renumbered per shard), so output paths are unique
+        # across shards and the trees merge by union.
+        indexed = list(enumerate(chosen))
+        if self.cfg.n_shards > 1:
+            indexed = [(sid, f) for sid, f in indexed
+                       if sid % self.cfg.n_shards == self.cfg.shard_index]
+            logger.info(
+                f"Shard {self.cfg.shard_index}/{self.cfg.n_shards}: "
+                f"{len(indexed)} of {len(chosen)} strains "
+                f"(ids {[sid for sid, _ in indexed]})")
+            if not indexed:
+                raise RuntimeError(
+                    f"Shard {self.cfg.shard_index} got no strains: only {len(chosen)} "
+                    f"founders were selected for n_shards={self.cfg.n_shards}.")
+
         gen0_dir = self.run_dir / "gen0"
         gen0_dir.mkdir(exist_ok=True)
-        for sid, f in enumerate(chosen):
+        for sid, f in indexed:
             binder_len = f.binder_len
             if binder_len is None or binder_len < 0:
                 binder_len = seed_extract._load_and_stitch(f.pdb_path, self.target_len)[2]
@@ -208,6 +225,19 @@ class ReseedRun:
     # ---- one round ---------------------------------------------------------------
     def run_round(self, k: int):
         gen_dir = self.run_dir / f"gen{k}"
+
+        # Checkpointing is per-round: a round only counts once it has been scored,
+        # collected and flushed. So any gen<k> already on disk here is debris from an
+        # attempt that was killed mid-round (time limit, preemption, node failure) and
+        # was never recorded. Leaving it would feed stale, half-generated designs into
+        # this round's scoring pass, where _collect_round would attribute them by name
+        # with no parent context (founder_id/parent_id None, RMSD-to-parent NaN) and
+        # let them compete for champion. Start every round from a clean directory.
+        if gen_dir.exists():
+            logger.warning(f"Round {k}: discarding leftover {gen_dir} from an "
+                           f"interrupted earlier attempt at this round")
+            shutil.rmtree(gen_dir, ignore_errors=True)
+
         scoring_input = gen_dir / "_scoring_input"
         scored_dir = gen_dir / "_scored"
         scoring_input.mkdir(parents=True, exist_ok=True)
@@ -527,6 +557,13 @@ class ReseedRun:
             "last_completed_round": last_round,
             "strains": {str(sid): asdict(s) for sid, s in self.strains.items()},
             "lineage": self.lineage,
+            # Persist the master RNG so a resumed run continues the same random stream.
+            # Without this the generator is rebuilt from master_seed on every restart,
+            # so a resumed round k redraws seed-cuts and generation seeds from the
+            # stream position round 1 saw - i.e. a run that was interrupted produces
+            # different progeny than the same run left alone. With it, resume is
+            # equivalent to an uninterrupted run.
+            "rng_state": self.master_rng.bit_generator.state,
         }
         with open(self.run_dir / "checkpoints" / f"{self.cfg.target}_state.json", "w") as fh:
             json.dump(ckpt, fh, indent=2)
@@ -539,6 +576,18 @@ class ReseedRun:
             ckpt = json.load(fh)
         self.strains = {int(sid): Strain(**s) for sid, s in ckpt["strains"].items()}
         self.lineage = ckpt["lineage"]
+        rng_state = ckpt.get("rng_state")
+        if rng_state is not None:
+            try:
+                self.master_rng.bit_generator.state = rng_state
+            except (ValueError, KeyError, TypeError) as e:  # noqa: BLE001
+                logger.warning(f"Could not restore RNG state ({e}); continuing from "
+                               f"master_seed. Progeny will differ from an "
+                               f"uninterrupted run, but the run stays valid.")
+        else:
+            logger.warning("Checkpoint predates RNG-state persistence; resuming from "
+                           "master_seed. Progeny from here on will differ from what an "
+                           "uninterrupted run would have produced.")
         if self.records_path.exists():
             self.records = pd.read_parquet(self.records_path).to_dict("records")
         elif self.records_csv.exists():
@@ -583,11 +632,17 @@ def main():
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--output_base_dir", type=str, default=None,
                     help="Override output_base_dir (e.g. a throwaway dir for a smoke test)")
+    ap.add_argument("--n_shards", type=int, default=None,
+                    help="Split the n_strains strains across this many independent jobs. "
+                         "Keep --n_strains at its GLOBAL value in every shard; each shard "
+                         "needs its own --output_base_dir.")
+    ap.add_argument("--shard_index", type=int, default=None,
+                    help="Which shard this job runs, in [0, n_shards).")
     args = ap.parse_args()
 
     overrides = {k: getattr(args, k) for k in
                  ("rounds", "n_strains", "samples_per_cut", "folding_model", "device",
-                  "output_base_dir")}
+                  "output_base_dir", "n_shards", "shard_index")}
     cfg = load_config(args.settings, overrides)
     sel = cfg.champion_selection
     if sel == "ss_stratified":
@@ -595,10 +650,11 @@ def main():
     seedsel = cfg.seed_selection
     if seedsel == "interface":
         seedsel += f" (cutoff {cfg.seed_interface_cutoff}Å, hotspots={cfg.seed_interface_hotspots or cfg.target_hotspot_residues})"
+    shard = "" if cfg.n_shards == 1 else f", shard={cfg.shard_index}/{cfg.n_shards}"
     logger.info(f"Re-seeding ablation for {cfg.target}: S={cfg.n_strains}, "
                 f"cuts={cfg.n_cuts}x{cfg.samples_per_cut}, R={cfg.rounds}, "
                 f"folding={cfg.folding_model}, champion={sel}, "
-                f"redistribute_budget={cfg.redistribute_budget}, seed={seedsel}")
+                f"redistribute_budget={cfg.redistribute_budget}, seed={seedsel}{shard}")
 
     run = ReseedRun(cfg)
     start_round = run.load_checkpoint() if args.resume else 0

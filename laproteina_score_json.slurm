@@ -6,7 +6,7 @@
 #SBATCH --qos=default
 #SBATCH --gres=gpu:1
 #SBATCH --mem 40gb
-#SBATCH --time 72:00:00
+#SBATCH --time 13:00:00
 #SBATCH --output=laproteina_score_json_%A.log
 
 set -eo pipefail

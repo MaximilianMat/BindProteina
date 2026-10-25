@@ -113,6 +113,80 @@ def parse_condition_from_path(path_str):
 
 
 # ============================================================
+# SCORING LOOKUP (for --select)
+# ============================================================
+# NOTE: kept byte-for-byte equivalent to the same helpers in
+# scripts/seed_ablation_clusters.py so the two analyses select identical sets.
+# If you change one, change the other (or factor both into functions/).
+
+_TRUE_STRINGS = {"true", "1", "1.0", "yes", "pass", "passed", "y", "t"}
+_SCORING_CSV = "scoring_summary.csv"
+
+
+def build_scoring_index(roots):
+    """Map ``(run_dir, design_name) -> passed_pyrosetta_filters``.
+
+    IMPORTANT: the key includes the run directory. ``design_name`` is only
+    unique *within* a run -- seed-search runs all emit ``linked_sample_NNN``, so
+    a global name set would match a design that passed in one condition against
+    identically-named PDBs in every other condition (5x over-count on
+    seed_search_cd19: 148 instead of 30).
+
+    A run whose scoring_summary.csv is missing or empty contributes nothing, so
+    its structures are absent from the index and get dropped by any --select
+    mode other than 'all'.
+    """
+    index = {}
+    n_csv = n_empty = 0
+    for root in roots:
+        for csv_path in root.rglob(_SCORING_CSV):
+            if csv_path.name.startswith("._"):  # macOS resource fork
+                continue
+            n_csv += 1
+            try:
+                if csv_path.stat().st_size == 0:
+                    n_empty += 1
+                    continue
+                df = pd.read_csv(csv_path)
+            except Exception:
+                n_empty += 1
+                continue
+            if df.empty or "design_name" not in df.columns:
+                n_empty += 1
+                continue
+
+            if "pyrosetta_filter_pass" in df.columns:
+                ok = (df["pyrosetta_filter_pass"].astype(str)
+                        .str.strip().str.lower().isin(_TRUE_STRINGS))
+            else:
+                # Cannot verify a pass without the column -> treat as not passing,
+                # consistent with analyze_successful_binders.py.
+                ok = pd.Series(False, index=df.index)
+
+            run_dir = str(csv_path.parent)
+            for name, passed in zip(df["design_name"].astype(str), ok):
+                index[(run_dir, name)] = bool(passed)
+
+    print(f"  scoring index: {len(index)} designs from {n_csv} "
+          f"{_SCORING_CSV} files ({n_empty} empty/unusable)")
+    return index
+
+
+def scoring_key(pdb_file):
+    """Key a PDB into the scoring index.
+
+    The scoring CSV sits beside the PDB directory (``<run_dir>/<pdb_dir>/x.pdb``
+    next to ``<run_dir>/scoring_summary.csv``) in all three layouts -- complexa
+    ``shard_XXX/``, seed-search ``initial_*/`` and reseed ``genN/_scored/``.
+    Relaxed PDBs carry a ``_relaxed`` suffix that design_name does not.
+    """
+    stem = pdb_file.stem
+    if stem.endswith("_relaxed"):
+        stem = stem[: -len("_relaxed")]
+    return (str(pdb_file.parent.parent), stem)
+
+
+# ============================================================
 # DSSP ANALYSIS
 # ============================================================
 
@@ -168,9 +242,49 @@ def main():
         description="Secondary structure scatter plot for ablation study (relaxed PDBs only)."
     )
     parser.add_argument("--input", required=True, nargs='+', help="One or more input folders (folder basename = source label)")
+    parser.add_argument(
+        "--labels",
+        nargs='+',
+        help=(
+            "Optional display label per --input folder (same count and order). "
+            "Repeat a label to pool several folders into one group, e.g. "
+            "--labels 'Proteina Complexa' 'Proteina Complexa' 'LaProteina' 'LaProteina'"
+        ),
+    )
     parser.add_argument("--output", required=True, help="Output folder for plots and CSV")
     parser.add_argument("--chain", default="B", help="Chain ID to analyze (default: B)")
     parser.add_argument("--residue", help="Optional hotspot residue filter (e.g. '60' for hs60)")
+    parser.add_argument(
+        "--pdb-dir",
+        dest="pdb_dir",
+        default="relaxed",
+        help="Name of the leaf directory containing the PDBs (default: relaxed)",
+    )
+    parser.add_argument(
+        "--include-path",
+        dest="include_path",
+        help=(
+            "Only keep PDBs whose full path matches this regex. Use it to pin a target "
+            "when an input root mixes several, e.g. --include-path '/CD19/'"
+        ),
+    )
+    parser.add_argument(
+        "--exclude-path",
+        dest="exclude_path",
+        help="Drop PDBs whose full path matches this regex. Applied after --include-path.",
+    )
+    parser.add_argument(
+        "--select",
+        choices=["all", "scored", "pyrosetta_pass"],
+        default="all",
+        help=(
+            "Which structures to analyse. 'all' (default) = every PDB on disk, the "
+            "historical behaviour. 'scored' = only those with a row in the run's "
+            "scoring_summary.csv. 'pyrosetta_pass' = only those whose row has "
+            "pyrosetta_filter_pass true, matching "
+            "scripts/analyze_successful_binders.py and seed_ablation_clusters.py."
+        ),
+    )
     parser.add_argument(
         "--split-by",
         dest="split_by",
@@ -186,26 +300,69 @@ def main():
     args = parser.parse_args()
 
     input_dirs = [Path(p) for p in args.input]
+
+    if args.labels:
+        if len(args.labels) != len(input_dirs):
+            parser.error(
+                f"--labels takes exactly one label per --input folder "
+                f"({len(input_dirs)} folders, {len(args.labels)} labels given)"
+            )
+        source_labels = list(args.labels)
+    else:
+        source_labels = [d.name for d in input_dirs]
+
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------------
     # 1. Discover all relaxed PDB files
     # --------------------------------------------------------
-    print(f"Scanning {[str(d) for d in input_dirs]} for relaxed/*.pdb ...")
+    print(f"Scanning {[str(d) for d in input_dirs]} for {args.pdb_dir}/*.pdb ...")
     # pdb_files is a list of (path, source_label) tuples
     pdb_files = []
-    for input_dir in input_dirs:
-        source = input_dir.name
-        for p in sorted(input_dir.rglob("relaxed/*.pdb")):
-            if p.is_file() and p.parent.name == "relaxed":
+    for input_dir, source in zip(input_dirs, source_labels):
+        for p in sorted(input_dir.rglob(f"{args.pdb_dir}/*.pdb")):
+            if p.is_file() and p.parent.name == args.pdb_dir:
                 pdb_files.append((p, source))
 
     if args.residue:
         pdb_files = [(p, s) for p, s in pdb_files if f"hs{args.residue}" in str(p)]
         print(f"  Filtered to hotspot residue hs{args.residue}")
 
-    print(f"  Found {len(pdb_files)} successful PDB files.\n")
+    if args.include_path:
+        rx = re.compile(args.include_path)
+        before = len(pdb_files)
+        pdb_files = [(p, s) for p, s in pdb_files if rx.search(str(p))]
+        print(f"  --include-path {args.include_path!r}: kept {len(pdb_files)}/{before}")
+
+    if args.exclude_path:
+        rx = re.compile(args.exclude_path)
+        before = len(pdb_files)
+        pdb_files = [(p, s) for p, s in pdb_files if not rx.search(str(p))]
+        print(f"  --exclude-path {args.exclude_path!r}: kept {len(pdb_files)}/{before}")
+
+    if args.select != "all":
+        scoring_index = build_scoring_index(input_dirs)
+        before = len(pdb_files)
+        if args.select == "scored":
+            pdb_files = [(p, s) for p, s in pdb_files
+                         if scoring_key(p) in scoring_index]
+        else:  # pyrosetta_pass
+            pdb_files = [(p, s) for p, s in pdb_files
+                         if scoring_index.get(scoring_key(p), False)]
+        print(f"  --select {args.select}: kept {len(pdb_files)}/{before}")
+        if not pdb_files:
+            print("No structures left after --select filtering. Exiting.")
+            return
+
+    print(f"  Found {len(pdb_files)} successful PDB files.")
+
+    # Per-source counts up front: makes a mislabelled or contaminated input obvious
+    # before spending minutes on DSSP.
+    per_source = Counter(s for _, s in pdb_files)
+    for lbl in dict.fromkeys(source_labels):
+        print(f"    {lbl}: {per_source.get(lbl, 0)}")
+    print()
 
     if len(pdb_files) == 0:
         print("No PDB files found. Exiting.")
@@ -264,7 +421,15 @@ def main():
     # --------------------------------------------------------
     # 3. Scatter plot: Helix % vs Sheet %, colored by split_col
     # --------------------------------------------------------
-    groups = sorted(df[split_col].unique())
+    # Keep the order the user passed on the command line for 'source';
+    # anything else has no meaningful input order, so sort it.
+    if split_col == "source":
+        seen = dict.fromkeys(source_labels)
+        present = set(df["source"].unique())
+        groups = [g for g in seen if g in present]
+    else:
+        groups = sorted(df[split_col].unique())
+
     palette = dict(zip(groups, sns.color_palette("Set2", n_colors=len(groups))))
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -274,6 +439,7 @@ def main():
         x="helix_frac",
         y="sheet_frac",
         hue=split_col,
+        hue_order=groups,
         palette=palette,
         alpha=0.6,
         edgecolor="white",

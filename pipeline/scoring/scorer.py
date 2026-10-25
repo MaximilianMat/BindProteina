@@ -414,7 +414,9 @@ def score_complexes(
         "pLDDT": "pLDDT",
         "binder_pLDDT": "Binder_pLDDT",
         "pTM": "pTM",
+        "binder_pTM": "Binder_pTM",
         "i_pTM": "i_pTM",
+        "binder_iptm": "Binder_ipTM",
         "pAE": "pAE",
         "i_pAE": "i_pAE",
         "sc_rmsd": "Binder_RMSD",
@@ -820,7 +822,9 @@ def score_from_protenix_json(
 
     metric_to_suffix = {
         "pLDDT": "pLDDT", "binder_pLDDT": "Binder_pLDDT",
-        "pTM": "pTM", "i_pTM": "i_pTM", "pAE": "pAE", "i_pAE": "i_pAE",
+        "pTM": "pTM", "binder_pTM": "Binder_pTM",
+        "i_pTM": "i_pTM", "binder_iptm": "Binder_ipTM",
+        "pAE": "pAE", "i_pAE": "i_pAE",
         "ipsae": "ipSAE", "ipsae_min": "ipSAE_min",
     }
     passing = []

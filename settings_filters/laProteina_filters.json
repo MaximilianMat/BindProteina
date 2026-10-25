@@ -32,15 +32,15 @@
         "higher": true
     },
     "Average_pTM": {
-        "threshold": 0.84,
+        "threshold": null,
         "higher": true
     },
     "1_pTM": {
-        "threshold": 0.55,
+        "threshold": null,
         "higher": true
     },
     "2_pTM": {
-        "threshold": 0.55,
+        "threshold": null,
         "higher": true
     },
     "3_pTM": {
@@ -56,15 +56,15 @@
         "higher": true
     },
     "Average_i_pTM": {
-        "threshold": 0.74,
+        "threshold": 0.50,
         "higher": true
     },
     "1_i_pTM": {
-        "threshold": 0.5,
+        "threshold": 0.50,
         "higher": true
     },
     "2_i_pTM": {
-        "threshold": 0.5,
+        "threshold": 0.50,
         "higher": true
     },
     "3_i_pTM": {
@@ -248,7 +248,7 @@
         "higher": false
     },
     "Average_Surface_Hydrophobicity": {
-        "threshold": 0.43,
+        "threshold": 0.35,
         "higher": false
     },
     "1_Surface_Hydrophobicity": {
@@ -272,15 +272,15 @@
         "higher": false
     },
     "Average_ShapeComplementarity": {
-        "threshold": 0.5,
+        "threshold": 0.6,
         "higher": true
     },
     "1_ShapeComplementarity": {
-        "threshold": 0.5,
+        "threshold": 0.6,
         "higher": true
     },
     "2_ShapeComplementarity": {
-        "threshold": 0.5,
+        "threshold": 0.6,
         "higher": true
     },
     "3_ShapeComplementarity": {
@@ -416,7 +416,7 @@
         "higher": true
     },
     "Average_Interface_Hydrophobicity": {
-        "threshold": 45,
+        "threshold": null,
         "higher": true
     },
     "1_Interface_Hydrophobicity": {
@@ -464,7 +464,7 @@
         "higher": true
     },
     "Average_n_InterfaceHbonds": {
-        "threshold": 6,
+        "threshold": 3,
         "higher": true
     },
     "1_n_InterfaceHbonds": {
@@ -512,15 +512,15 @@
         "higher": true
     },
     "Average_n_InterfaceUnsatHbonds": {
-        "threshold": null,
+        "threshold": 4,
         "higher": false
     },
     "1_n_InterfaceUnsatHbonds": {
-        "threshold": null,
+        "threshold": 4,
         "higher": false
     },
     "2_n_InterfaceUnsatHbonds": {
-        "threshold": null,
+        "threshold": 4,
         "higher": false
     },
     "3_n_InterfaceUnsatHbonds": {
@@ -1244,51 +1244,75 @@
         "higher": false
     },
     "Average_Binder_pLDDT": {
-        "threshold": 0.7,
+        "threshold": null,
         "higher": true
     },
     "1_Binder_pLDDT": {
-        "threshold": 0.7,
+        "threshold": null,
         "higher": true
     },
     "2_Binder_pLDDT": {
-        "threshold": 0.7,
+        "threshold": null,
         "higher": true
     },
     "3_Binder_pLDDT": {
-        "threshold": 0.7,
+        "threshold": null,
         "higher": true
     },
     "4_Binder_pLDDT": {
-        "threshold": 0.7,
+        "threshold": null,
         "higher": true
     },
     "5_Binder_pLDDT": {
-        "threshold": 0.7,
+        "threshold": null,
         "higher": true
     },
     "Average_Binder_pTM": {
-        "threshold": null,
+        "threshold": 0.88,
+        "higher": true
+    },
+    "Average_Binder_ipTM": {
+        "threshold": 0.85,
         "higher": true
     },
     "1_Binder_pTM": {
-        "threshold": null,
+        "threshold": 0.88,
+        "higher": true
+    },
+    "1_Binder_ipTM": {
+        "threshold": 0.85,
         "higher": true
     },
     "2_Binder_pTM": {
-        "threshold": null,
+        "threshold": 0.88,
+        "higher": true
+    },
+    "2_Binder_ipTM": {
+        "threshold": 0.85,
         "higher": true
     },
     "3_Binder_pTM": {
-        "threshold": null,
+        "threshold": 0.88,
+        "higher": true
+    },
+    "3_Binder_ipTM": {
+        "threshold": 0.85,
         "higher": true
     },
     "4_Binder_pTM": {
-        "threshold": null,
+        "threshold": 0.88,
+        "higher": true
+    },
+    "4_Binder_ipTM": {
+        "threshold": 0.85,
         "higher": true
     },
     "5_Binder_pTM": {
-        "threshold": null,
+        "threshold": 0.88,
+        "higher": true
+    },
+    "5_Binder_ipTM": {
+        "threshold": 0.85,
         "higher": true
     },
     "Average_Binder_pAE": {
@@ -1316,27 +1340,27 @@
         "higher": false
     },
     "Average_Binder_RMSD": {
-        "threshold": 4.5,
+        "threshold": 5,
         "higher": false
     },
     "1_Binder_RMSD": {
-        "threshold": 4.5,
+        "threshold": 5,
         "higher": false
     },
     "2_Binder_RMSD": {
-        "threshold": 4.5,
+        "threshold": 5,
         "higher": false
     },
     "3_Binder_RMSD": {
-        "threshold": 4.5,
+        "threshold": 5,
         "higher": false
     },
     "4_Binder_RMSD": {
-        "threshold": 4.5,
+        "threshold": 5,
         "higher": false
     },
     "5_Binder_RMSD": {
-        "threshold": 4.5,
+        "threshold": 5,
         "higher": false
     },
     "Hotspot_Contacts": {

@@ -251,11 +251,33 @@ def _build_metrics_dict(
     binder_cols = chain_pair_iptm[0][1:] if (len(chain_pair_iptm) > 0 and len(chain_pair_iptm[0]) > 1) else []
     cross_iptm = sum(binder_cols) / len(binder_cols) if binder_cols else None
 
+    # Per-chain pTM. Protenix emits "chain_ptm" in the same summary_confidence
+    # dict as chain_plddt/chain_iptm (see Protenix sample_confidence.py, key
+    # "chain_ptm"). Chain 0 is the target, so [1:] is the binder -- same
+    # convention as binder_pLDDT / binder_ipTM above. Averaged over binder
+    # chains for multi-chain binders.
+    #
+    # This is the quantity PXDesign's Protenix filter gates on
+    # ("binder pTM > 0.88", Table 3 of doi:10.1101/2025.08.15.670450) -- NOT
+    # the complex-level "ptm" below, which is dominated by the (large, rigid,
+    # always-well-predicted) target chain and is therefore a poor proxy.
+    # Natively 0-1, like pTM/i_pTM; no x100 rescaling (unlike chain_plddt).
+    chain_ptm = best_data.get("chain_ptm") or []
+    binder_ptm = (
+        sum(chain_ptm[1:]) / len(chain_ptm[1:])
+        if len(chain_ptm) > 1 else None
+    )
+
+    chain_pair_iptm = best_data.get("chain_pair_iptm") or []
+    binder_cols = chain_pair_iptm[0][1:] if (len(chain_pair_iptm) > 0 and len(chain_pair_iptm[0]) > 1) else []
+    cross_iptm = sum(binder_cols) / len(binder_cols) if binder_cols else None
+
     return {
         "pLDDT":           plddt,
         "binder_pLDDT":    binder_plddt,
         "pTM":             best_data.get("ptm", 0.0),
         "i_pTM":           best_data.get("iptm", 0.0),
+        "binder_pTM":      binder_ptm,
         "ranking_score":   best_data.get("ranking_score", 0.0),
         "gpde":            best_data.get("gpde"),
         "binder_iptm":     binder_iptm,

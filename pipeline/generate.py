@@ -204,6 +204,14 @@ def main():
         default=None,
         help="Number of diffusion samples per design for Protenix (default: 5; use 3 for ~40%% speedup)"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for LaProteina generation (default: 5, or laproteina_settings.seed). "
+             "Replicate runs of the same settings MUST use different seeds - generation is "
+             "deterministic, so a repeated seed reproduces identical samples."
+    )
 
     args = parser.parse_args()
     
@@ -299,6 +307,13 @@ def main():
     n_total_samples = lp_settings.get("n_samples", 50)
     # batch_size for generation (affects GPU memory usage)
     batch_size = lp_settings.get("batch_size", 2)
+    # Generation is deterministic given the seed: two runs of one settings file with
+    # the same seed produce identical samples. Replicate runs must override it.
+    generation_seed = int(
+        args.seed
+        if args.seed is not None
+        else lp_settings.get("seed", settings.get("seed", 5))
+    )
     # n_linker_starting_points: number of different linker attachment positions.
     # Total samples are split evenly among starting points.
     # e.g., n_samples=24, n_linker_starting_points=4 → 6 samples per starting point
@@ -374,6 +389,7 @@ def main():
                (f" (+1 for first {remainder_samples})" if remainder_samples else ""))
     logger.info(f"  binder_length_range: {binder_length_range}")
     logger.info(f"  batch_size: {batch_size}")
+    logger.info(f"  generation_seed: {generation_seed}")
     logger.info(f"  direct_binder_mode: {direct_binder_mode}")
     logger.info(f"  linked_input_mode: {linked_input_mode}")
     logger.info(f"  cath_codes: {cath_codes}")
@@ -514,6 +530,7 @@ def main():
             direct_binder_mode=True,
             binder_target_nres=target_length,
             max_batch_size=batch_size,
+            seed=generation_seed,
             cath_codes=cath_codes,
             len_cath_code_path=len_cath_code_path,
             cath_code_level=cath_code_level,
@@ -536,6 +553,7 @@ def main():
             design_id="linked",
             direct_binder_mode=False,
             max_batch_size=batch_size,
+            seed=generation_seed,
             cath_codes=cath_codes,
             len_cath_code_path=len_cath_code_path,
             cath_code_level=cath_code_level,
