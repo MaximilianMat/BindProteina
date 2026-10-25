@@ -1,5 +1,5 @@
 {
-  "_comment": "Paths mirror settings_evolution/NPT2B.json. FILL baseline_run_dir with the prior blind position/orientation run for NPT2B (a generate.py output dir with scoring_summary.csv). It supplies gen-0 founders AND the RQ1 baseline.",
+  "_comment": "FILL baseline_run_dir with the prior blind position/orientation run for NPT2B (a generate.py output dir with scoring_summary.csv). It supplies gen-0 founders AND the RQ1 baseline.",
   "target": "NPT2B",
   "target_pdb": "/nfs/homedirs/matscher/targets/npt2b_LP/npt2b.pdb",
   "baseline_run_dir": "TODO_FILL_PRIOR_BLIND_RUN_DIR",

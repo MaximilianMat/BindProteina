@@ -9,10 +9,10 @@ Generates a diverse pool of initial binder candidates with:
 - Binder position overlap metric (Jaccard) to detect position drift
 
 Usage:
-    python generate_initial.py --settings settings_generation/my_target.json
-    
-    # Can also use existing evolution settings (with sensible defaults for new params):
-    python generate_initial.py --settings settings_evolution/CLD18.json
+    python pipeline/generate.py --settings settings_target/PDL1_direct_binder.json
+
+    # Or via SLURM:
+    sbatch laproteina_generate_batch.slurm --settings settings_target/NPT2B.json
 """
 
 import argparse
@@ -159,7 +159,7 @@ def main():
         "--settings", 
         type=str, 
         required=True,
-        help="Path to JSON settings file (e.g., settings_generation/my_target.json)"
+        help="Path to JSON settings file (e.g., settings_target/PDL1_direct_binder.json)"
     )
     parser.add_argument(
         "--skip_scoring",
@@ -703,10 +703,11 @@ def main():
     
     logger.info(f"Results saved to: {output_dir}")
     
-    # Print path to scored results for use with evolve_v2.py
+    # Print path to scored results; this run can seed a re-seeding ablation
+    # (pipeline/reseed/) as its baseline_run_dir.
     scoring_summary = output_dir / "scored" / "scoring_summary.csv"
     if scoring_summary.exists():
-        logger.info(f"\nTo continue with evolution, use:")
+        logger.info(f"\nTo continue with a re-seeding ablation, use:")
         logger.info(f"  --input_csv {scoring_summary}")
         logger.info(f"  --seeds_dir {output_dir / 'scored'}")
 

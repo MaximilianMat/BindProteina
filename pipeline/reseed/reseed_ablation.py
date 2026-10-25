@@ -72,7 +72,7 @@ def split_target_binder(pdb_in: str, pdb_out: str, target_len: int) -> bool:
     """Split a single-chain LaProteina output into chain A (target) + chain B (binder).
 
     Residues 1..target_len -> chain A; the rest -> chain B, renumbered from 1.
-    Mirrors ``evolve_v2.py`` Phase 3. Returns False if the sample has no binder region.
+    Returns False if the sample has no binder region.
     """
     import biotite.structure as struc
     import biotite.structure.io as strucio

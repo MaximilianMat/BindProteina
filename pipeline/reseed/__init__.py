@@ -11,6 +11,6 @@ Implements the progeny / re-seeding evolutionary ablation described in
   - Progeny are refolded + scored with the existing pipeline; the champion for the
     next round is drawn *uniformly at random* from that strain's passing samples.
 
-The package deliberately does not modify `pipeline/evolve_v2.py`, `pipeline/generate.py`,
-or the scoring stack — it only reuses them.
+The package deliberately does not modify `pipeline/generate.py` or the scoring
+stack — it only reuses them.
 """

@@ -3,8 +3,8 @@
 Iterative, self-contained-strain re-seeding of LaProteina binders (spec `reseed_ablation_spec.md`).
 Founders = post-filter successes from a prior blind run; each round fragments a strain's champion
 into five seed-cuts (P1..P5), scaffolds progeny around each, refolds/scores them with the existing
-pipeline, and advances a **uniformly-random** winner. Does not modify `evolve_v2.py`, `generate.py`,
-or the scoring stack.
+pipeline, and advances a **uniformly-random** winner. Does not modify `generate.py` or the
+scoring stack.
 
 ## Modules
 | File | Role |
